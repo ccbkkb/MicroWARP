@@ -2,13 +2,10 @@ name: Build and Publish MicroWARP
 
 # ==========================================
 # 触发条件：
-# 1. 每次 Push 代码到 main, master 或 dev 分支
-# 2. 发布 Release 版本时
-# 3. 手动点击触发按钮
+# 1. 发布 Release 版本时自动构建 (打标签)
+# 2. 手动点击触发按钮 (方便随时测试打包)
 # ==========================================
 on:
-  push:
-    branches: [ "main", "master", "dev" ]
   release:
     types: [published]
   workflow_dispatch:
