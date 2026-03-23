@@ -134,7 +134,7 @@ services:
     container_name: microwarp
     restart: always
     ports:
-      - "127.0.0.11080:1080" # 标准的无密码 SOCKS5 端口，仅监听本机
+      - "127.0.0.1:1080:1080" # 标准的无密码 SOCKS5 端口，仅监听本机
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
