@@ -1,6 +1,23 @@
 #!/bin/sh
 set -e
 
+build_wgcf_download_url() {
+    WGCF_VER=$1
+    WGCF_ARCH=$2
+    RAW_URL="https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VER}/wgcf_${WGCF_VER}_linux_${WGCF_ARCH}"
+
+    if [ -n "${GH_PROXY:-}" ]; then
+        echo "${GH_PROXY%/}/${RAW_URL}"
+        return 0
+    fi
+
+    echo "$RAW_URL"
+}
+
+if [ "${MICROWARP_TEST_MODE:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 WG_CONF="/etc/wireguard/wg0.conf"
 mkdir -p /etc/wireguard
 
@@ -19,7 +36,7 @@ if [ ! -f "$WG_CONF" ]; then
 
     WGCF_VER=$(curl -sL https://api.github.com/repos/ViRb3/wgcf/releases/latest | grep '"tag_name"' | sed 's/.*"v\(.*\)".*/\1/')
     echo "==> [MicroWARP] 检测到最新 wgcf 版本: v${WGCF_VER}"
-    wget --timeout=15 -qO wgcf "https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VER}/wgcf_${WGCF_VER}_linux_${WGCF_ARCH}"
+    wget --timeout=15 -qO wgcf "$(build_wgcf_download_url "$WGCF_VER" "$WGCF_ARCH")"
     chmod +x wgcf
 
     echo "==> [MicroWARP] 正在向 CF 注册设备..."
