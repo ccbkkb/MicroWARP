@@ -1,0 +1,63 @@
+name: E2E Proxy Test (端到端连通性测试)
+
+on:
+  # 【默认开启】仅允许在 GitHub 网页上手动点击触发
+  workflow_dispatch:
+  
+  # 【已注释】如果以后你想在每次推送到 main 分支时自动跑测试，取消下面两行的注释即可
+  # push:
+  #   branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 检出项目源码
+        uses: actions/checkout@v4
+
+      - name: 🔨 从源码构建 Docker 镜像 (Local Build)
+        # 不拉取 ghcr，直接用当前目录的 Dockerfile 和 entrypoint.sh 现场编译
+        run: |
+          echo "开始构建 microwarp-test 镜像..."
+          docker build -t microwarp-test:local .
+
+      - name: 🚀 部署并运行容器
+        # 赋予 NET_ADMIN 权限，映射 1080 端口，拉起内核网卡
+        run: |
+          docker run -d \
+            --name test-container \
+            --cap-add NET_ADMIN \
+            --cap-add SYS_MODULE \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -p 1080:1080 \
+            microwarp-test:local
+            
+      - name: ⏳ 等待 WARP 隧道初始化 (10秒)
+        # 给 wgcf 注册账号和 wg0 网卡 UDP 握手留出时间
+        run: |
+          echo "容器已启动，等待 10 秒钟让内核网卡完成握手..."
+          sleep 10
+
+      - name: 🎯 测试 SOCKS5 代理连通性
+        # 使用 curl 通过 1080 端口请求 Cloudflare 骨干网测速节点
+        run: |
+          echo "开始请求 SOCKS5 代理..."
+          # 设置最大超时时间为 10 秒，防止死锁卡住流水线
+          curl -v -m 10 -x socks5://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace
+          echo -e "\n✅ 代理连通性测试通过！"
+
+      - name: 📜 打印容器启动日志 (前 30 行)
+        # 使用 if: always() 确保即使上面的 curl 测试失败报错了，这一步也会执行，方便你排错！
+        if: always()
+        run: |
+          echo "========================================="
+          echo "    MicroWARP 容器启动日志 (前 30 行)    "
+          echo "========================================="
+          docker logs test-container | head -n 30
+          
+          # 【锦上添花】顺便打印一下最后 15 行，方便你看最终有没有报错
+          echo -e "\n========================================="
+          echo "    MicroWARP 容器最新状态 (后 15 行)    "
+          echo "========================================="
+          docker logs test-container | tail -n 15
