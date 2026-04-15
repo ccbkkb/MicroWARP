@@ -71,7 +71,7 @@ services:
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
     volumes:
-      - warp-data:/etc/wireguard # Keep account data to avoid rate limits
+      - ./warp-data:/etc/wireguard # Keep account data to avoid rate limits
 
 volumes:
   warp-data:
@@ -143,7 +143,7 @@ services:
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
     volumes:
-      - warp-data:/etc/wireguard # 持久化保存账号凭证
+      - ./warp-data:/etc/wireguard # 持久化保存账号凭证
 
 volumes:
   warp-data:

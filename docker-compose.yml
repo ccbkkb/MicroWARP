@@ -22,7 +22,7 @@ services:
     #   - TAILSCALE_CIDR=100.64.0.0/10     # Tailscale 回程路由 CIDR，默认 100.64.0.0/10，非 Tailscale 场景无需设置
     #   - MICROWARP_TEST_MODE=0       # 测试模式，设为 1 时跳过所有初始化逻辑，用于 CI/调试
     volumes:
-      - warp-data:/etc/wireguard
+      - ./warp-data:/etc/wireguard
 
 volumes:
   warp-data:
