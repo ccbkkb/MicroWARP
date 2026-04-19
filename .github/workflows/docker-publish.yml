@@ -54,7 +54,7 @@ jobs:
             type=semver,pattern={{version}}
             
             # 2. 【正式版保护】仅在真正发布 Release 时才打 latest 标签！
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.action == 'published' }}
             
             # 3. 【灰度测试专属】如果是手动点击 Run workflow 触发，自动打上你输入的标签 (默认 preview)
             type=raw,value=${{ github.event.inputs.image_tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
