@@ -172,7 +172,9 @@ MTU = 1280
 
 [Peer]
 PublicKey = $WG_PUB_KEY
-Endpoint = $WG_ENDPOINT[Socks5]
+Endpoint = $WG_ENDPOINT
+
+[Socks5]
 BindAddress = ${LISTEN_ADDR}:${LISTEN_PORT}
 EOF
     if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
