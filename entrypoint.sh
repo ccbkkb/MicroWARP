@@ -4,7 +4,7 @@ set -e
 # ==========================================
 # 0. DEBUG 模式与双语日志系统初始化
 # ==========================================
-if[ "${DEBUG:-0}" = "1" ]; then
+if [ "${DEBUG:-0}" = "1" ]; then
     set -x
 fi
 
@@ -80,7 +80,7 @@ sed -i '/^Address/d' "$WG_CONF"
 sed -i '/^AllowedIPs/d' "$WG_CONF"
 sed -i '/^DNS.*/d' "$WG_CONF"
 
-if[ -n "$IPV4_ADDR" ]; then
+if [ -n "$IPV4_ADDR" ]; then
     sed -i "/\[Interface\]/a Address = $IPV4_ADDR" "$WG_CONF"
 fi
 sed -i "/\[Peer\]/a AllowedIPs = 0.0.0.0\/0" "$WG_CONF"
@@ -117,7 +117,7 @@ fi
 # ==========================================
 # 4. 路由拉起与代理引擎启动
 # ==========================================
-if[ "$USE_FALLBACK" = "0" ]; then
+if [ "$USE_FALLBACK" = "0" ]; then
     # ----------------------------------------
     # 模式 A: 原生内核级 MicroSOCKS (KVM 环境)
     # ----------------------------------------
@@ -170,7 +170,7 @@ Endpoint = $WG_ENDPOINT[Socks5]
 BindAddress = ${LISTEN_ADDR}:${LISTEN_PORT}
 EOF
 
-    if[ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
+    if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
         sed -i "/\[Socks5\]/a Username = $SOCKS_USER\nPassword = $SOCKS_PASS" "$WP_CONF"
         log_info "身份认证已开启 (User: $SOCKS_USER)" "Authentication enabled (User: $SOCKS_USER)"
     else
