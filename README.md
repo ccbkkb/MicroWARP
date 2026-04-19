@@ -157,7 +157,7 @@ MicroWARP 支持通过环境变量解锁更强大的能力：
 ```
 
 #### 🛡️ Scaleway 等纯 IPv6 机器配置指南
-如果你的 VPS 连 IPv4 地址都没有（瞎子 VPS），请勿配置 Docker 的复杂网络栈。直接使用宿主机网络并开启纯 v6 模式，MicroWARP 会自动寻找 CF 的 IPv6 接入点：
+如果你的 VPS 连 IPv4 地址都没有（IPv6_Only VPS），请勿配置 Docker 的复杂网络栈。直接使用宿主机网络并开启纯 v6 模式，MicroWARP 会自动寻找 CF 的 IPv6 接入点：
 ```yaml
     network_mode: "host" # 删除原有的 ports 映射，改为这行
     environment:
