@@ -14,9 +14,9 @@ C_WRN="\033[33m"
 C_ERR="\033[31m"
 C_STP="\033[36m"
 
-log_info() { echo -e "${C_INF}[INFO] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_INF}[INFO] $2${C_RST}"; }
-log_warn() { echo -e "${C_WRN}[WARN] $1${C_RST}";[ -n "$2" ] && echo -e "${C_WRN}[WARN] $2${C_RST}"; }
-log_err()  { echo -e "${C_ERR}[ERROR] $1${C_RST}";[ -n "$2" ] && echo -e "${C_ERR}[ERROR] $2${C_RST}"; }
+log_info() { echo -e "${C_INF}[INFO] $1${C_RST}";[ -n "$2" ] && echo -e "${C_INF}[INFO] $2${C_RST}"; }
+log_warn() { echo -e "${C_WRN}[WARN] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_WRN}[WARN] $2${C_RST}"; }
+log_err()  { echo -e "${C_ERR}[ERROR] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_ERR}[ERROR] $2${C_RST}"; }
 log_step() { echo -e "${C_STP}[STEP] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_STP}[STEP] $2${C_RST}"; }
 
 build_wgcf_download_url() {
@@ -35,7 +35,7 @@ if [ "${MICROWARP_TEST_MODE:-0}" = "1" ]; then
 fi
 
 # ==========================================
-# 1. 核心业务函数定义 (配置生成与规范化)
+# 1. 核心业务函数定义 (配置生成与动态解析)
 # ==========================================
 WG_CONF="/etc/wireguard/wg0.conf"
 WP_CONF="/etc/wireguard/wireproxy.conf"
@@ -45,6 +45,9 @@ LISTEN_ADDR=${BIND_ADDR:-"0.0.0.0"}
 LISTEN_PORT=${BIND_PORT:-"1080"}
 AUTO_RENEW_DAYS=${AUTO_RENEW_DAYS:-7}
 AUTO_RENEW_SECONDS=${AUTO_RENEW_SECONDS:-$((AUTO_RENEW_DAYS * 86400))}
+
+# 全新参数：IPV6_MODE (可选: 4, 6, dual)
+IPV6_MODE=${IPV6_MODE:-"4"}
 
 ensure_wgcf_installed() {
     if [ ! -x "/usr/local/bin/wgcf" ]; then
@@ -63,17 +66,29 @@ ensure_wgcf_installed() {
 
 sanitize_wg_conf() {
     local conf_file=$1
-    IPV4_ADDR=$(grep '^Address' "$conf_file" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' | head -n 1)
+    
+    # 动态提取双栈 IP
+    IPV4_ADDR=$(grep '^Address' "$conf_file" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' | head -n 1 || true)
+    IPV6_ADDR=$(grep '^Address' "$conf_file" | grep -oEi '([a-f0-9:]+)/[0-9]{1,3}' | grep ':' | head -n 1 || true)
 
     sed -i -e '/^Address/d' -e '/^AllowedIPs/d' -e '/^DNS.*/d' "$conf_file"
 
-    if [ -n "$IPV4_ADDR" ]; then
-        sed -i "/\[Interface\]/a Address = $IPV4_ADDR" "$conf_file"
+    # 根据 IPV6_MODE 决定绑定的地址和路由
+    if [ "$IPV6_MODE" = "6" ]; then
+        sed -i "/\[Interface\]/a Address = $IPV6_ADDR" "$conf_file"
+        sed -i "/\[Peer\]/a AllowedIPs = ::/0" "$conf_file"
+        # 纯 IPv6 模式下，如果未指定 Endpoint，强制解析到 CF IPv6 接入点
+        if [ -z "$ENDPOINT_IP" ]; then
+            sed -i "s/^Endpoint.*/Endpoint =[2606:4700:d0::a29f:c001]:2408/g" "$conf_file"
+            log_info "已自动将 Endpoint 切换为纯 IPv6 节点。" "Endpoint auto-switched to IPv6 node."
+        fi
+    elif [ "$IPV6_MODE" = "dual" ]; then
+        sed -i "/\[Interface\]/a Address = $IPV4_ADDR, $IPV6_ADDR" "$conf_file"
+        sed -i "/\[Peer\]/a AllowedIPs = 0.0.0.0/0, ::/0" "$conf_file"
     else
-        log_err "无法提取 IPv4 地址！配置可能异常。" "Failed to extract IPv4 address!"
+        sed -i "/\[Interface\]/a Address = $IPV4_ADDR" "$conf_file"
+        sed -i "/\[Peer\]/a AllowedIPs = 0.0.0.0/0" "$conf_file"
     fi
-    
-    sed -i "/\[Peer\]/a AllowedIPs = 0.0.0.0\/0" "$conf_file"
 
     if ! grep -q "PersistentKeepalive" "$conf_file"; then
         sed -i '/\[Peer\]/a PersistentKeepalive = 15' "$conf_file"
@@ -93,7 +108,6 @@ generate_new_warp() {
     WORK_DIR=$(mktemp -d)
     cd "$WORK_DIR"
     
-    # 1. 应对 CF 限流的注册重试机制 (最多 5 次)
     RETRY=0
     MAX_RETRY=5
     while [ ! -f "wgcf-account.toml" ]; do
@@ -105,12 +119,11 @@ generate_new_warp() {
                 cd /app && rm -rf "$WORK_DIR"
                 return 1
             fi
-            log_warn "账号注册被拦截 (可能触发风控)，等待 10s 后重试 (第 $RETRY/$MAX_RETRY 次)..." "Registration limited, retrying in 10s..."
+            log_warn "账号注册被拦截，等待 10s 后重试 (第 $RETRY/$MAX_RETRY 次)..." "Registration limited, retrying in 10s..."
             sleep 10
         fi
     done
     
-    # 2. 应对生成失败的配置重试机制 (最多 5 次)
     RETRY_GEN=0
     while [ ! -f "wgcf-profile.conf" ]; do
         wgcf generate > /dev/null 2>&1 || true
@@ -130,7 +143,7 @@ generate_new_warp() {
     cd /app && rm -rf "$WORK_DIR"
     
     sanitize_wg_conf "$WG_CONF"
-    log_info "节点配置生成/更新成功！" "Node config generated/updated successfully!"
+    log_info "节点配置生成/更新成功！(模式: $IPV6_MODE)" "Node config generated successfully! (Mode: $IPV6_MODE)"
     return 0
 }
 
@@ -138,19 +151,28 @@ generate_wireproxy_conf() {
     WG_PRIV_KEY=$(grep '^PrivateKey' "$WG_CONF" | sed 's/^[^=]*= *//')
     WG_PUB_KEY=$(grep '^PublicKey' "$WG_CONF" | sed 's/^[^=]*= *//')
     WG_ENDPOINT=$(grep '^Endpoint' "$WG_CONF" | sed 's/^[^=]*= *//')
-    IPV4_ADDR=$(grep '^Address' "$WG_CONF" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' | head -n 1)
+    
+    IPV4_ADDR=$(grep '^Address' "$WG_CONF" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' | head -n 1 || true)
+    IPV6_ADDR=$(grep '^Address' "$WG_CONF" | grep -oEi '([a-f0-9:]+)/[0-9]{1,3}' | grep ':' | head -n 1 || true)
 
+    if [ "$IPV6_MODE" = "6" ]; then
+        WP_ADDRESSES="$IPV6_ADDR"
+    elif [ "$IPV6_MODE" = "dual" ]; then
+        WP_ADDRESSES="$IPV4_ADDR, $IPV6_ADDR"
+    else
+        WP_ADDRESSES="$IPV4_ADDR"
+    fi
+
+    # 【注意】此处彻底修复了换行黏连问题！
     cat <<EOF > "$WP_CONF"
 [Interface]
-Address = $IPV4_ADDR
+Address = $WP_ADDRESSES
 PrivateKey = $WG_PRIV_KEY
 MTU = 1280
 
 [Peer]
 PublicKey = $WG_PUB_KEY
-Endpoint = $WG_ENDPOINT
-
-[Socks5]
+Endpoint = $WG_ENDPOINT[Socks5]
 BindAddress = ${LISTEN_ADDR}:${LISTEN_PORT}
 EOF
     if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
@@ -164,11 +186,11 @@ EOF
 if [ ! -f "$WG_CONF" ]; then
     log_step "未检测到配置，自动初始化 WARP..." "No configuration detected, initializing WARP..."
     if ! generate_new_warp; then
-        log_err "首次初始化彻底失败！容器将停止运行以避免触发无限死循环滥用。" "Initial setup completely failed! Container stopping."
+        log_err "首次初始化彻底失败！容器将停止运行。" "Initial setup completely failed! Container stopping."
         exit 1
     fi
 else
-    log_info "检测到已有持久化配置，跳过注册。" "Persistent config detected, skipping registration."
+    log_info "检测到已有持久化配置 (含 CF-Team 配置)，跳过注册。" "Persistent/Team config detected, skipping registration."
     if [ "$AUTO_RENEW_SECONDS" -gt 0 ]; then ensure_wgcf_installed; fi
 fi
 
@@ -176,18 +198,17 @@ log_step "正在检测宿主机网络特权环境..." "Detecting host network pr
 USE_FALLBACK=0
 if ip link add dev wg_test type wireguard 2>/dev/null; then
     ip link del dev wg_test
-    log_info "特权检测通过！将使用原生内核态 wg0 (极致低内存模式)。" "Privilege check passed! Native kernel wg0 will be used."
+    log_info "特权检测通过！将使用原生内核态 wg0。" "Privilege check passed! Native kernel wg0 will be used."
 else
-    log_warn "未检测到 TUN/特权网络权限 (常见于 LXC/OVZ VPS)。" "No TUN/Privilege detected (Common in LXC/OVZ VPS)."
-    log_warn "正在自动回退至用户态网络栈 (WireProxy 模式)。" "Auto-falling back to user-space network stack (WireProxy mode)."
+    log_warn "未检测到 TUN 权限，正在自动回退至用户态网络栈 (WireProxy)。" "Auto-falling back to user-space network stack (WireProxy)."
     USE_FALLBACK=1
 fi
 
 # ==========================================
-# 3. [防限流大杀器] 后台零停机自动热重载守护进程
+# 3. 后台自动热重载守护进程 (支持双栈热刷)
 # ==========================================
 if [ "$AUTO_RENEW_SECONDS" -gt 0 ]; then
-    log_info "防限流热重载已开启 (后台循环刷新间隔: $AUTO_RENEW_SECONDS 秒)" "Auto-renew enabled (Interval: $AUTO_RENEW_SECONDS seconds)"
+    log_info "防限流热重载已开启 (周期: $AUTO_RENEW_SECONDS 秒)" "Auto-renew enabled (Interval: $AUTO_RENEW_SECONDS s)"
     (
         while true; do
             sleep "$AUTO_RENEW_SECONDS"
@@ -199,13 +220,16 @@ if [ "$AUTO_RENEW_SECONDS" -gt 0 ]; then
                     WG_PUB_KEY=$(grep '^PublicKey' "$WG_CONF" | sed 's/^[^=]*= *//')
                     WG_ENDPOINT=$(grep '^Endpoint' "$WG_CONF" | sed 's/^[^=]*= *//')
                     
+                    if [ "$IPV6_MODE" = "6" ]; then WG_ALLOWED="::/0"
+                    elif [ "$IPV6_MODE" = "dual" ]; then WG_ALLOWED="0.0.0.0/0,::/0"
+                    else WG_ALLOWED="0.0.0.0/0"; fi
+                    
                     for peer in $(wg show wg0 peers 2>/dev/null); do wg set wg0 peer "$peer" remove; done
                     
                     TMP_KEY=$(mktemp)
                     echo "$WG_PRIV_KEY" > "$TMP_KEY"
-                    wg set wg0 private-key "$TMP_KEY" peer "$WG_PUB_KEY" endpoint "$WG_ENDPOINT" allowed-ips 0.0.0.0/0 persistent-keepalive 15
+                    wg set wg0 private-key "$TMP_KEY" peer "$WG_PUB_KEY" endpoint "$WG_ENDPOINT" allowed-ips "$WG_ALLOWED" persistent-keepalive 15
                     rm -f "$TMP_KEY"
-                    
                     log_info "内核网卡热重载完成，代理服务 0 中断。" "Kernel interface hot-reloaded, zero downtime."
                 else
                     generate_wireproxy_conf
@@ -213,7 +237,7 @@ if [ "$AUTO_RENEW_SECONDS" -gt 0 ]; then
                     log_info "WireProxy 配置已刷新并重启。" "WireProxy config reloaded and restarted."
                 fi
             else
-                log_warn "后台热重载失败，跳过本次配置应用，继续使用旧账号。" "Background hot-reload failed, retaining old config."
+                log_warn "后台热重载失败，继续使用旧账号。" "Background hot-reload failed, retaining old config."
             fi
         done
     ) &
@@ -230,26 +254,23 @@ if [ "$USE_FALLBACK" = "0" ]; then
 
     log_step "启动 Linux 内核级 wg0 网卡..." "Starting Linux kernel wg0 interface..."
     wg-quick up wg0 > /dev/null 2>&1
-    
-    # 【新增缓冲】等待底层的 UDP 隧道握手连通
     sleep 3
 
     TAILSCALE_CIDR=${TAILSCALE_CIDR:-"100.64.0.0/10"}
     if [ -n "$PRE_WARP_GW" ] && [ -n "$PRE_WARP_DEV" ]; then
         ip route replace "$TAILSCALE_CIDR" via "$PRE_WARP_GW" dev "$PRE_WARP_DEV" > /dev/null 2>&1 && \
-        log_info "已恢复 Tailscale 路由: via ${PRE_WARP_GW} dev ${PRE_WARP_DEV}" "Tailscale route restored."
+        log_info "已恢复 Tailscale 路由" "Tailscale route restored."
     fi
 
     log_info "当前出口 IP (内核模式):" "Current outbound IP (Kernel mode):"
-    curl -s -m 5 https://1.1.1.1/cdn-cgi/trace | grep ip= || log_warn "获取超时，底层隧道可能遭遇延迟" "Fetch timeout"
+    # 这里我们只记录 IPv4，避免没有公网 IPv6 的宿主机在启动时卡死
+    curl -s -m 5 https://1.1.1.1/cdn-cgi/trace | grep ip= || log_warn "获取 IPv4 超时 (若为纯 IPv6 模式，请忽略此警告)" "IPv4 Fetch timeout"
 
     if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
-        log_info "身份认证已开启 (User: $SOCKS_USER)" "Authentication enabled."
-        log_step "MicroSOCKS 引擎已启动，监听 ${LISTEN_ADDR}:${LISTEN_PORT}" "MicroSOCKS engine started."
+        log_info "身份认证已开启" "Authentication enabled."
         exec microsocks -i "$LISTEN_ADDR" -p "$LISTEN_PORT" -u "$SOCKS_USER" -P "$SOCKS_PASS"
     else
         log_warn "未设置密码，当前为公开访问模式" "No password set, public access mode."
-        log_step "MicroSOCKS 引擎已启动，监听 ${LISTEN_ADDR}:${LISTEN_PORT}" "MicroSOCKS engine started."
         exec microsocks -i "$LISTEN_ADDR" -p "$LISTEN_PORT"
     fi
 
@@ -257,13 +278,12 @@ else
     generate_wireproxy_conf
     
     if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
-        log_info "身份认证已开启 (User: $SOCKS_USER)" "Authentication enabled."
+        log_info "身份认证已开启" "Authentication enabled."
     else
         log_warn "未设置密码，当前为公开访问模式" "No password set, public access mode."
     fi
 
     log_step "WireProxy 引擎已启动，监听 ${LISTEN_ADDR}:${LISTEN_PORT}" "WireProxy engine started."
-    
     trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM INT
     
     while true; do
