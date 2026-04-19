@@ -2,13 +2,18 @@ name: Build and Publish MicroWARP
 
 # ==========================================
 # 触发条件：
-# 1. 发布 Release 版本时自动构建 (打标签)
-# 2. 手动点击触发按钮 (方便随时测试打包)
+# 1. 发布 Release 版本时自动构建 (打版本号和 latest 标签)
+# 2. 手动点击触发按钮 (默认打 preview 标签，用于灰度测试)
 # ==========================================
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: '请输入要构建的镜像标签 (如: preview, v1.0-rc1)'
+        required: true
+        default: 'preview'
 
 env:
   REGISTRY: ghcr.io
@@ -45,14 +50,17 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # 1. 如果是打 Tag 发版，生成严格的版本号标签 (如 1.0.0)
+            # 1. 如果是打 Tag 发版，生成严格的语义化版本号标签 (如 v1.0.0)
             type=semver,pattern={{version}}
             
-            # 2. 【核心隔离】仅当 Push 到 main/master，或发版时，才打 latest 标签！
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'release' }}
+            # 2. 【正式版保护】仅在真正发布 Release 时才打 latest 标签！
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
             
-            # 3. 【新增分支】仅当 Push 到 dev 分支时，才打 dev 标签！(绝不污染 latest)
-            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+            # 3. 【灰度测试专属】如果是手动点击 Run workflow 触发，自动打上你输入的标签 (默认 preview)
+            type=raw,value=${{ github.event.inputs.image_tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            
+            # 4. 【分支绑定】推送 next 分支打 preview 标签
+            type=raw,value=preview,enable=${{ github.ref == 'refs/heads/next' && github.event_name == 'push' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
