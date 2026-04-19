@@ -15,7 +15,7 @@ C_ERR="\033[31m"
 C_STP="\033[36m"
 
 log_info() { echo -e "${C_INF}[INFO] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_INF}[INFO] $2${C_RST}"; }
-log_warn() { echo -e "${C_WRN}[WARN] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_WRN}[WARN] $2${C_RST}"; }
+log_warn() { echo -e "${C_WRN}[WARN] $1${C_RST}";[ -n "$2" ] && echo -e "${C_WRN}[WARN] $2${C_RST}"; }
 log_err()  { echo -e "${C_ERR}[ERROR] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_ERR}[ERROR] $2${C_RST}"; }
 log_step() { echo -e "${C_STP}[STEP] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_STP}[STEP] $2${C_RST}"; }
 
@@ -129,7 +129,7 @@ if [ "$USE_FALLBACK" = "0" ]; then
     wg-quick up wg0 > /dev/null 2>&1
 
     TAILSCALE_CIDR=${TAILSCALE_CIDR:-"100.64.0.0/10"}
-    if [ -n "$PRE_WARP_GW" ] && [ -n "$PRE_WARP_DEV" ]; then
+    if [ -n "$PRE_WARP_GW" ] &&[ -n "$PRE_WARP_DEV" ]; then
         if ip route replace "$TAILSCALE_CIDR" via "$PRE_WARP_GW" dev "$PRE_WARP_DEV" > /dev/null 2>&1; then
             log_info "已恢复 Tailscale 路由: via ${PRE_WARP_GW} dev ${PRE_WARP_DEV}" "Tailscale route restored."
         fi
@@ -152,13 +152,14 @@ else
     # ----------------------------------------
     # 模式 B: 用户态 WireProxy 降级 (LXC/OVZ 环境)
     # ----------------------------------------
-    # 提取现有 wg0.conf 参数，无缝转换为 wireproxy 格式
     # 【修复】使用精准正则截取，防止 Base64 密钥末尾的 '=' 填充符被误删
     WG_PRIV_KEY=$(grep '^PrivateKey' "$WG_CONF" | sed 's/^[^=]*= *//')
     WG_PUB_KEY=$(grep '^PublicKey' "$WG_CONF" | sed 's/^[^=]*= *//')
     WG_ENDPOINT=$(grep '^Endpoint' "$WG_CONF" | sed 's/^[^=]*= *//')
-    
+
     WP_CONF="/etc/wireguard/wireproxy.conf"
+    
+    # 【修复】此处确保 Endpoint 和 Socks5 之间有换行
     cat <<EOF > "$WP_CONF"
 [Interface]
 Address = $IPV4_ADDR
@@ -167,7 +168,9 @@ MTU = 1280
 
 [Peer]
 PublicKey = $WG_PUB_KEY
-Endpoint = $WG_ENDPOINT[Socks5]
+Endpoint = $WG_ENDPOINT
+
+[Socks5]
 BindAddress = ${LISTEN_ADDR}:${LISTEN_PORT}
 EOF
 
