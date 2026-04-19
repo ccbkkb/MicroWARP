@@ -15,9 +15,9 @@ C_ERR="\033[31m"
 C_STP="\033[36m"
 
 log_info() { echo -e "${C_INF}[INFO] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_INF}[INFO] $2${C_RST}"; }
-log_warn() { echo -e "${C_WRN}[WARN] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_WRN}[WARN] $2${C_RST}"; }
+log_warn() { echo -e "${C_WRN}[WARN] $1${C_RST}";[ -n "$2" ] && echo -e "${C_WRN}[WARN] $2${C_RST}"; }
 log_err()  { echo -e "${C_ERR}[ERROR] $1${C_RST}";[ -n "$2" ] && echo -e "${C_ERR}[ERROR] $2${C_RST}"; }
-log_step() { echo -e "${C_STP}[STEP] $1${C_RST}";[ -n "$2" ] && echo -e "${C_STP}[STEP] $2${C_RST}"; }
+log_step() { echo -e "${C_STP}[STEP] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_STP}[STEP] $2${C_RST}"; }
 
 build_wgcf_download_url() {
     WGCF_VER=$1
@@ -112,7 +112,7 @@ generate_new_warp() {
     
     # 2. 应对生成失败的配置重试机制 (最多 5 次)
     RETRY_GEN=0
-    while [ ! -f "wgcf-profile.conf" ]; do
+    while[ ! -f "wgcf-profile.conf" ]; do
         wgcf generate > /dev/null 2>&1 || true
         if [ ! -f "wgcf-profile.conf" ]; then
             RETRY_GEN=$((RETRY_GEN+1))
@@ -153,7 +153,7 @@ Endpoint = $WG_ENDPOINT
 [Socks5]
 BindAddress = ${LISTEN_ADDR}:${LISTEN_PORT}
 EOF
-    if [ -n "$SOCKS_USER" ] &&[ -n "$SOCKS_PASS" ]; then
+    if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
         sed -i "/\[Socks5\]/a Username = $SOCKS_USER\nPassword = $SOCKS_PASS" "$WP_CONF"
     fi
 }
@@ -164,7 +164,7 @@ EOF
 if [ ! -f "$WG_CONF" ]; then
     log_step "未检测到配置，自动初始化 WARP..." "No configuration detected, initializing WARP..."
     if ! generate_new_warp; then
-        log_err "首次初始化彻底失败！容器将停止运行以避免触发无限死循环滥用。" "Initial setup completely failed! Container stopping to prevent abuse."
+        log_err "首次初始化彻底失败！容器将停止运行以避免触发无限死循环滥用。" "Initial setup completely failed! Container stopping."
         exit 1
     fi
 else
