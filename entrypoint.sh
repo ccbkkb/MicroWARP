@@ -14,9 +14,9 @@ C_WRN="\033[33m"
 C_ERR="\033[31m"
 C_STP="\033[36m"
 
-log_info() { echo -e "${C_INF}[INFO] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_INF}[INFO] $2${C_RST}"; }
+log_info() { echo -e "${C_INF}[INFO] $1${C_RST}";[ -n "$2" ] && echo -e "${C_INF}[INFO] $2${C_RST}"; }
 log_warn() { echo -e "${C_WRN}[WARN] $1${C_RST}";[ -n "$2" ] && echo -e "${C_WRN}[WARN] $2${C_RST}"; }
-log_err()  { echo -e "${C_ERR}[ERROR] $1${C_RST}";[ -n "$2" ] && echo -e "${C_ERR}[ERROR] $2${C_RST}"; }
+log_err()  { echo -e "${C_ERR}[ERROR] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_ERR}[ERROR] $2${C_RST}"; }
 log_step() { echo -e "${C_STP}[STEP] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_STP}[STEP] $2${C_RST}"; }
 
 build_wgcf_download_url() {
@@ -41,11 +41,9 @@ WG_CONF="/etc/wireguard/wg0.conf"
 WP_CONF="/etc/wireguard/wireproxy.conf"
 mkdir -p /etc/wireguard
 
-# 环境参数预载
 LISTEN_ADDR=${BIND_ADDR:-"0.0.0.0"}
 LISTEN_PORT=${BIND_PORT:-"1080"}
 AUTO_RENEW_DAYS=${AUTO_RENEW_DAYS:-7}
-# 如果存在测试用的 SECONDS 参数，则覆盖原有的倒计时逻辑
 AUTO_RENEW_SECONDS=${AUTO_RENEW_SECONDS:-$((AUTO_RENEW_DAYS * 86400))}
 
 ensure_wgcf_installed() {
@@ -67,11 +65,15 @@ sanitize_wg_conf() {
     local conf_file=$1
     IPV4_ADDR=$(grep '^Address' "$conf_file" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' | head -n 1)
 
-    sed -i '/^Address/d; /^AllowedIPs/d; /^DNS.*/d' "$conf_file"
+    # 拆分 sed 命令，确保 Alpine 下的绝对兼容
+    sed -i -e '/^Address/d' -e '/^AllowedIPs/d' -e '/^DNS.*/d' "$conf_file"
 
     if [ -n "$IPV4_ADDR" ]; then
         sed -i "/\[Interface\]/a Address = $IPV4_ADDR" "$conf_file"
+    else
+        log_err "无法提取 IPv4 地址！配置可能异常。" "Failed to extract IPv4 address!"
     fi
+    
     sed -i "/\[Peer\]/a AllowedIPs = 0.0.0.0\/0" "$conf_file"
 
     if ! grep -q "PersistentKeepalive" "$conf_file"; then
@@ -127,7 +129,7 @@ Endpoint = $WG_ENDPOINT
 [Socks5]
 BindAddress = ${LISTEN_ADDR}:${LISTEN_PORT}
 EOF
-    if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
+    if [ -n "$SOCKS_USER" ] &&[ -n "$SOCKS_PASS" ]; then
         sed -i "/\[Socks5\]/a Username = $SOCKS_USER\nPassword = $SOCKS_PASS" "$WP_CONF"
     fi
 }
@@ -199,15 +201,18 @@ if [ "$USE_FALLBACK" = "0" ]; then
 
     log_step "启动 Linux 内核级 wg0 网卡..." "Starting Linux kernel wg0 interface..."
     wg-quick up wg0 > /dev/null 2>&1
+    
+    # 【新增缓冲】等待底层的 UDP 隧道握手连通
+    sleep 3
 
     TAILSCALE_CIDR=${TAILSCALE_CIDR:-"100.64.0.0/10"}
-    if [ -n "$PRE_WARP_GW" ] && [ -n "$PRE_WARP_DEV" ]; then
+    if [ -n "$PRE_WARP_GW" ] &&[ -n "$PRE_WARP_DEV" ]; then
         ip route replace "$TAILSCALE_CIDR" via "$PRE_WARP_GW" dev "$PRE_WARP_DEV" > /dev/null 2>&1 && \
         log_info "已恢复 Tailscale 路由: via ${PRE_WARP_GW} dev ${PRE_WARP_DEV}" "Tailscale route restored."
     fi
 
     log_info "当前出口 IP (内核模式):" "Current outbound IP (Kernel mode):"
-    curl -s -m 5 https://1.1.1.1/cdn-cgi/trace | grep ip= || log_warn "获取超时" "Fetch timeout"
+    curl -s -m 5 https://1.1.1.1/cdn-cgi/trace | grep ip= || log_warn "获取超时，底层隧道可能遭遇延迟" "Fetch timeout"
 
     if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
         log_info "身份认证已开启 (User: $SOCKS_USER)" "Authentication enabled."
@@ -222,7 +227,7 @@ if [ "$USE_FALLBACK" = "0" ]; then
 else
     generate_wireproxy_conf
     
-    if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
+    if [ -n "$SOCKS_USER" ] &&[ -n "$SOCKS_PASS" ]; then
         log_info "身份认证已开启 (User: $SOCKS_USER)" "Authentication enabled."
     else
         log_warn "未设置密码，当前为公开访问模式" "No password set, public access mode."
