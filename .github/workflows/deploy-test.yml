@@ -44,7 +44,7 @@ jobs:
         run: |
           echo "开始请求 SOCKS5 代理..."
           
-          if[ "${{ matrix.ipv6_mode }}" = "6" ]; then
+          if [ "${{ matrix.ipv6_mode }}" = "6" ]; then
             echo "⚠️ [注意] 检测到纯 IPv6 模式 (IPV6_MODE=6)。"
             echo "由于 GitHub Actions 官方服务器不具备公网 IPv6 能力，底层的 WireGuard 物理握手必定会超时失败。"
             echo "纯 IPv6 模式在 CI 中仅验证『环境初始化』和『配置生成转换』是否正确，现已通过并跳过连通性测试！✅"
@@ -84,7 +84,7 @@ jobs:
         run: |
           echo "开始请求 SOCKS5 代理 (重载后验证新账号)..."
           
-          if[ "${{ matrix.ipv6_mode }}" = "6" ]; then
+          if [ "${{ matrix.ipv6_mode }}" = "6" ]; then
             echo "⚠️ [跳过] 纯 IPv6 连通性测试因 GitHub Runner 限制已豁免。"
             exit 0
           fi
