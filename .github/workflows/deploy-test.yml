@@ -14,7 +14,7 @@ jobs:
           - env_name: "KVM/物理机 (内核特权模式)"
             docker_args: "--cap-add NET_ADMIN --cap-add SYS_MODULE --sysctl net.ipv4.conf.all.src_valid_mark=1"
           - env_name: "LXC/OVZ (用户态降级模式)"
-            docker_args: ""
+            docker_args: "" 
 
     steps:
       - name: 📥 检出项目源码
@@ -80,9 +80,19 @@ jobs:
         run: |
           echo "等待后台长连接下载任务结束 (预期总耗时 20s)..."
           PID=$(cat bg_pid.txt)
-          wait $PID || true
-          CODE=$(cat http_code.txt)
-          if [ "$CODE" = "200" ]; then
+          
+          # 【修复】改用 kill -0 轮询跨 Shell 监控后台进程
+          while kill -0 $PID 2>/dev/null; do
+            sleep 1
+          done
+          
+          if [ -s http_code.txt ]; then
+            CODE=$(cat http_code.txt)
+          else
+            CODE="000"
+          fi
+          
+          if[ "$CODE" = "200" ]; then
             echo -e "\n✅ 太强了！在底层公私钥被完全替换的情况下，现有的 SOCKS5 长连接[0 毫秒] 掉线，完美存活！"
           else
             echo -e "\n❌ 长连接测试失败！发生断流，HTTP 状态码: $CODE"
