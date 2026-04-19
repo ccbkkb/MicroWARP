@@ -14,10 +14,10 @@ C_WRN="\033[33m"
 C_ERR="\033[31m"
 C_STP="\033[36m"
 
-log_info() { echo -e "${C_INF}[INFO] $1${C_RST}";[ -n "$2" ] && echo -e "${C_INF}[INFO] $2${C_RST}"; }
-log_warn() { echo -e "${C_WRN}[WARN] $1${C_RST}";[ -n "$2" ] && echo -e "${C_WRN}[WARN] $2${C_RST}"; }
-log_err()  { echo -e "${C_ERR}[ERROR] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_ERR}[ERROR] $2${C_RST}"; }
-log_step() { echo -e "${C_STP}[STEP] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_STP}[STEP] $2${C_RST}"; }
+log_info() { echo -e "${C_INF}[INFO] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_INF}[INFO] $2${C_RST}"; }
+log_warn() { echo -e "${C_WRN}[WARN] $1${C_RST}"; [ -n "$2" ] && echo -e "${C_WRN}[WARN] $2${C_RST}"; }
+log_err()  { echo -e "${C_ERR}[ERROR] $1${C_RST}";[ -n "$2" ] && echo -e "${C_ERR}[ERROR] $2${C_RST}"; }
+log_step() { echo -e "${C_STP}[STEP] $1${C_RST}";[ -n "$2" ] && echo -e "${C_STP}[STEP] $2${C_RST}"; }
 
 build_wgcf_download_url() {
     WGCF_VER=$1
@@ -65,7 +65,6 @@ sanitize_wg_conf() {
     local conf_file=$1
     IPV4_ADDR=$(grep '^Address' "$conf_file" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' | head -n 1)
 
-    # 拆分 sed 命令，确保 Alpine 下的绝对兼容
     sed -i -e '/^Address/d' -e '/^AllowedIPs/d' -e '/^DNS.*/d' "$conf_file"
 
     if [ -n "$IPV4_ADDR" ]; then
@@ -93,14 +92,39 @@ generate_new_warp() {
     
     WORK_DIR=$(mktemp -d)
     cd "$WORK_DIR"
-    wgcf register --accept-tos > /dev/null 2>&1
-    wgcf generate > /dev/null 2>&1
     
-    if [ ! -f "wgcf-profile.conf" ]; then
-        log_err "配置生成失败！(可能被 CF 临时拦截)" "Configuration generation failed!"
-        cd /app && rm -rf "$WORK_DIR"
-        return 1
-    fi
+    # 1. 应对 CF 限流的注册重试机制 (最多 5 次)
+    RETRY=0
+    MAX_RETRY=5
+    while[ ! -f "wgcf-account.toml" ]; do
+        wgcf register --accept-tos > /dev/null 2>&1 || true
+        if [ ! -f "wgcf-account.toml" ]; then
+            RETRY=$((RETRY+1))
+            if [ "$RETRY" -gt "$MAX_RETRY" ]; then
+                log_err "账号注册失败已达 $MAX_RETRY 次！放弃本次申请。" "Registration failed $MAX_RETRY times, aborting."
+                cd /app && rm -rf "$WORK_DIR"
+                return 1
+            fi
+            log_warn "账号注册被拦截 (可能触发风控)，等待 10s 后重试 (第 $RETRY/$MAX_RETRY 次)..." "Registration limited, retrying in 10s..."
+            sleep 10
+        fi
+    done
+    
+    # 2. 应对生成失败的配置重试机制 (最多 5 次)
+    RETRY_GEN=0
+    while [ ! -f "wgcf-profile.conf" ]; do
+        wgcf generate > /dev/null 2>&1 || true
+        if [ ! -f "wgcf-profile.conf" ]; then
+            RETRY_GEN=$((RETRY_GEN+1))
+            if [ "$RETRY_GEN" -gt "$MAX_RETRY" ]; then
+                log_err "配置生成失败已达 $MAX_RETRY 次！放弃本次申请。" "Profile generation failed $MAX_RETRY times, aborting."
+                cd /app && rm -rf "$WORK_DIR"
+                return 1
+            fi
+            log_warn "配置提取失败，等待 5s 后重试 (第 $RETRY_GEN/$MAX_RETRY 次)..." "Profile extraction failed, retrying in 5s..."
+            sleep 5
+        fi
+    done
     
     mv wgcf-profile.conf "$WG_CONF"
     cd /app && rm -rf "$WORK_DIR"
@@ -139,7 +163,10 @@ EOF
 # ==========================================
 if [ ! -f "$WG_CONF" ]; then
     log_step "未检测到配置，自动初始化 WARP..." "No configuration detected, initializing WARP..."
-    generate_new_warp
+    if ! generate_new_warp; then
+        log_err "首次初始化彻底失败！容器将停止运行以避免触发无限死循环滥用。" "Initial setup completely failed! Container stopping to prevent abuse."
+        exit 1
+    fi
 else
     log_info "检测到已有持久化配置，跳过注册。" "Persistent config detected, skipping registration."
     if [ "$AUTO_RENEW_SECONDS" -gt 0 ]; then ensure_wgcf_installed; fi
@@ -185,6 +212,8 @@ if [ "$AUTO_RENEW_SECONDS" -gt 0 ]; then
                     killall -TERM wireproxy 2>/dev/null || true
                     log_info "WireProxy 配置已刷新并重启。" "WireProxy config reloaded and restarted."
                 fi
+            else
+                log_warn "后台热重载失败，跳过本次配置应用，继续使用旧账号。" "Background hot-reload failed, retaining old config."
             fi
         done
     ) &
@@ -206,7 +235,7 @@ if [ "$USE_FALLBACK" = "0" ]; then
     sleep 3
 
     TAILSCALE_CIDR=${TAILSCALE_CIDR:-"100.64.0.0/10"}
-    if [ -n "$PRE_WARP_GW" ] &&[ -n "$PRE_WARP_DEV" ]; then
+    if [ -n "$PRE_WARP_GW" ] && [ -n "$PRE_WARP_DEV" ]; then
         ip route replace "$TAILSCALE_CIDR" via "$PRE_WARP_GW" dev "$PRE_WARP_DEV" > /dev/null 2>&1 && \
         log_info "已恢复 Tailscale 路由: via ${PRE_WARP_GW} dev ${PRE_WARP_DEV}" "Tailscale route restored."
     fi
@@ -214,7 +243,7 @@ if [ "$USE_FALLBACK" = "0" ]; then
     log_info "当前出口 IP (内核模式):" "Current outbound IP (Kernel mode):"
     curl -s -m 5 https://1.1.1.1/cdn-cgi/trace | grep ip= || log_warn "获取超时，底层隧道可能遭遇延迟" "Fetch timeout"
 
-    if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
+    if [ -n "$SOCKS_USER" ] &&[ -n "$SOCKS_PASS" ]; then
         log_info "身份认证已开启 (User: $SOCKS_USER)" "Authentication enabled."
         log_step "MicroSOCKS 引擎已启动，监听 ${LISTEN_ADDR}:${LISTEN_PORT}" "MicroSOCKS engine started."
         exec microsocks -i "$LISTEN_ADDR" -p "$LISTEN_PORT" -u "$SOCKS_USER" -P "$SOCKS_PASS"
@@ -227,7 +256,7 @@ if [ "$USE_FALLBACK" = "0" ]; then
 else
     generate_wireproxy_conf
     
-    if [ -n "$SOCKS_USER" ] &&[ -n "$SOCKS_PASS" ]; then
+    if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
         log_info "身份认证已开启 (User: $SOCKS_USER)" "Authentication enabled."
     else
         log_warn "未设置密码，当前为公开访问模式" "No password set, public access mode."
