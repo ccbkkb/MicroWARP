@@ -153,10 +153,11 @@ else
     # 模式 B: 用户态 WireProxy 降级 (LXC/OVZ 环境)
     # ----------------------------------------
     # 提取现有 wg0.conf 参数，无缝转换为 wireproxy 格式
-    WG_PRIV_KEY=$(grep '^PrivateKey' "$WG_CONF" | cut -d '=' -f 2 | tr -d ' ')
-    WG_PUB_KEY=$(grep '^PublicKey' "$WG_CONF" | cut -d '=' -f 2 | tr -d ' ')
-    WG_ENDPOINT=$(grep '^Endpoint' "$WG_CONF" | cut -d '=' -f 2 | tr -d ' ')
-
+    # 【修复】使用精准正则截取，防止 Base64 密钥末尾的 '=' 填充符被误删
+    WG_PRIV_KEY=$(grep '^PrivateKey' "$WG_CONF" | sed 's/^[^=]*= *//')
+    WG_PUB_KEY=$(grep '^PublicKey' "$WG_CONF" | sed 's/^[^=]*= *//')
+    WG_ENDPOINT=$(grep '^Endpoint' "$WG_CONF" | sed 's/^[^=]*= *//')
+    
     WP_CONF="/etc/wireguard/wireproxy.conf"
     cat <<EOF > "$WP_CONF"
 [Interface]
