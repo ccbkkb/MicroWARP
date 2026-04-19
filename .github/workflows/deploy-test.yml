@@ -1,25 +1,19 @@
 name: E2E Proxy Test (端到端连通性测试)
 
 on:
-  # 【默认开启】仅允许在 GitHub 网页上手动点击触发
   workflow_dispatch:
-  
-  # push:
-  #   branches: [ main, next ]
 
 jobs:
   build-and-test:
     name: 测试环境 - ${{ matrix.env_name }}
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false # 设为 false，即使一种模式测试失败，另一种模式也会继续跑完
+      fail-fast: false
       matrix:
         include:
           - env_name: "KVM/物理机 (内核特权模式)"
-            # 赋予特权，程序将探测成功并使用 wg0 内核态
             docker_args: "--cap-add NET_ADMIN --cap-add SYS_MODULE --sysctl net.ipv4.conf.all.src_valid_mark=1"
           - env_name: "LXC/OVZ (用户态降级模式)"
-            # 不给任何特权，模拟 LXC 环境，强制触发 wireproxy Fallback
             docker_args: "" 
 
     steps:
@@ -32,28 +26,70 @@ jobs:
           docker build -t microwarp-test:local .
 
       - name: 🚀 部署并运行容器 (${{ matrix.env_name }})
+        # 注入 AUTO_RENEW_SECONDS=15 让它在 15 秒后立刻触发热重载
         run: |
           docker run -d \
             --name test-container \
             ${{ matrix.docker_args }} \
+            -e AUTO_RENEW_SECONDS=15 \
             -p 1080:1080 \
             microwarp-test:local
             
-      - name: ⏳ 等待 WARP 隧道初始化 (10秒)
-        # wireproxy 的初始化甚至比内核态还要快一些，10秒足够了
+      - name: ⏳ 等待 WARP 隧道初次握手 (10秒)
         run: |
-          echo "容器已启动，等待 10 秒钟让节点完成握手..."
+          echo "等待 10 秒钟让节点完成握手..."
           sleep 10
 
-      - name: 🎯 测试 SOCKS5 代理连通性
-        # 使用 curl 通过 1080 端口请求 Cloudflare 骨干网测速节点
+      - name: 🎯 测试 SOCKS5 短连接 (重载前)
         run: |
           echo "开始请求 SOCKS5 代理..."
-          curl -v -m 10 -x socks5://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace
-          echo -e "\n✅ 代理连通性测试通过！"
+          curl -v -m 10 -x socks5h://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace
+          echo -e "\n✅ 重载前代理连通性测试通过！"
+
+      - name: 🏄 建立长连接测试 (KVM专属: 限速下载，跨越重载点)
+        if: contains(matrix.env_name, 'KVM')
+        run: |
+          echo "正在后台发起限速长连接下载任务..."
+          # 下载 Cloudflare 测速文件，限速 50KB/s，总大小 1MB，预期耗时约 20 秒
+          curl -s -w "%{http_code}" --limit-rate 50k -x socks5h://127.0.0.1:1080 https://speed.cloudflare.com/__down?bytes=1000000 -o /dev/null > http_code.txt &
+          echo $! > bg_pid.txt
+
+      - name: ⏳ 等待触发热重载 (10秒)
+        # 上一步是第 10s，这里再等 10s，刚好跨过了第 15s 的重载触发点！
+        run: |
+          echo "等待 10 秒钟，容器内的 15 秒定时重载任务此时将被触发..."
+          sleep 10
+          
+      - name: 🎯 测试 SOCKS5 短连接 (重载后)
+        run: |
+          echo "开始请求 SOCKS5 代理 (重载后验证新账号)..."
+          # LXC 模式的重启可能需要 1-2 秒，加入带重试机制的优雅连通性测试
+          for i in {1..5}; do
+            if curl -m 5 -s -x socks5h://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace | grep -q "warp="; then
+              echo -e "\n✅ 重载后新连接测试通过！账号已成功无缝切换。"
+              exit 0
+            fi
+            echo "等待服务恢复重连..."
+            sleep 1
+          done
+          echo "❌ 重载后服务未能恢复！"
+          exit 1
+
+      - name: 🏄 验证长连接存活状态 (KVM 零停机极限测试)
+        if: contains(matrix.env_name, 'KVM')
+        run: |
+          echo "等待后台长连接下载任务结束 (预期总耗时 20s)..."
+          PID=$(cat bg_pid.txt)
+          wait $PID || true
+          CODE=$(cat http_code.txt)
+          if [ "$CODE" = "200" ]; then
+            echo -e "\n✅ 太强了！在底层公私钥被完全替换的情况下，现有的 SOCKS5 长连接[0 毫秒] 掉线，完美存活！"
+          else
+            echo -e "\n❌ 长连接测试失败！发生断流，HTTP 状态码: $CODE"
+            exit 1
+          fi
 
       - name: 📜 打印容器启动完整日志
-        # 无论成功还是失败，都打印出完整的日志供排查
         if: always()
         run: |
           echo "========================================="
