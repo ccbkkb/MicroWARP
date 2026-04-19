@@ -7,7 +7,7 @@
 > 
 > *Please strictly comply with the laws and regulations of your country and region. Any legal disputes or consequences arising from illegal use of this project have nothing to do with this project and its authors.*
 
-[English](#english) |[中文说明](#chinese)
+[English](#english) | [中文说明](#chinese)
 
 ### 📊 Performance Comparison
 
@@ -15,9 +15,9 @@ Here is a real-world performance test on a 1C1G (1 vCPU, 1GB RAM) VPS, comparing
 
 以下是在 1C1G 服务器上的真实运行数据截图对比：
 
-| Metric (指标) | `caomingjun/warp` (Official Daemon) | 🚀 `MicroWARP` (Pure C + Kernel approach) | Improvement (提升) |
+| Metric (指标) | `caomingjun/warp` (Official Daemon) | 🚀 `MicroWARP` (Pure C + Kernel) | Improvement (提升) |
 | :--- | :--- | :--- | :--- |
-| **Image Size**<br>(Docker 镜像体积) | 201 MB | **9.08 MB** | 📉 **-95%** |
+| **Image Size**<br>(Docker 镜像体积) | 201 MB | **~10 MB** | 📉 **-95%** |
 | **RAM Usage**<br>(日常内存占用) | ~150 MB | **800 KiB** (< 1MB) | 📉 **-99.4%** |
 | **CPU Overhead**<br>(高并发 CPU 损耗) | High (Userspace App) | **~0.25%** (Kernel Space) | ⚡ **Near Zero** |
 | **Core Engine**<br>(底层核心引擎) | Cloudflare `warp-cli` (Rust) | Linux `wg0` + Pure C `microsocks` | 🛠️ **Minimalist** |
@@ -35,27 +35,17 @@ Here is a real-world performance test on a 1C1G (1 vCPU, 1GB RAM) VPS, comparing
 ## 🇬🇧 English
 
 A minimalist, high-performance Cloudflare WARP SOCKS5 proxy in Docker. 
-Designed as a lightweight drop-in replacement for standard WARP proxy images (e.g., `caomingjun/warp`).
+Designed as a lightweight drop-in replacement for standard WARP proxy images.
 
-### 🌟 Why MicroWARP?
-
-Many popular WARP Docker images rely on the official Cloudflare `warp-cli` daemon. This approach typically results in significant memory usage (often **150MB+**) and potential process overhead under high concurrency.
-
-**MicroWARP** is built differently:
-1. **Kernel-Level WireGuard**: Instead of the userspace client, it leverages the native Linux `wg0` interface for near-zero CPU overhead.
-2. **MicroSOCKS Engine**: Uses a pure C-based `microsocks` server to minimize resource consumption.
-3. **Minimal Memory Footprint**: Runs smoothly on **< 5MB RAM** (often ~800KB). Highly optimized for resource-constrained environments (e.g., 1C1G VPS).
-4. **Seamless Tailscale Integration**: Natively resolves asymmetric routing blackholes, fully compatible with Tailnet inbound connections.
-5. **Multi-Arch**: Native support for `amd64` and `arm64`.
-
-### 🎯 Use Cases
-*   **API Routing**: Route crawlers or AI API gateways (like Grok, ChatGPT) through MicroWARP to leverage high-trust Cloudflare IPs.
-*   **Outbound Privacy**: Obfuscate your server's real IP by using WARP as your default egress network to prevent direct traceback.
-*   **Sidecar Proxy**: Perfectly designed as an ultra-lightweight Docker Sidecar network gateway.
+### ✨ Feature Highlights
+*   **Zero-Downtime Auto-Renew**: Automatically requests a new free account every 7 days and performs a hot-reload without breaking existing connections to prevent CF rate-limiting.
+*   **IPv6 Dual Stack Ready**: Natively supports IPv4 only (`4`), IPv6 only (`6`), and full dual-stack (`dual`) routing out of the box.
+*   **LXC / OVZ Auto-Fallback**: Automatically detects if the host has `NET_ADMIN` privileges. If not (e.g., LXC containers), it seamlessly degrades to userspace mode (`wireproxy`) to ensure 100% compatibility.
+*   **Cloudflare Zero Trust (Teams) Support**: Drop your own `wg0.conf` into the volume to bypass registration and connect directly to your Team network.
 
 ### 📦 Quick Start
 
-Map port `1080` and grant `NET_ADMIN` privileges. Create a `docker-compose.yml`:
+Map port `1080` and grant privileges. Create a `docker-compose.yml`:
 
 ```yaml
 services:
@@ -71,32 +61,38 @@ services:
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
     volumes:
-      - warp-data:/etc/wireguard # Keep account data to avoid rate limits
+      - warp-data:/etc/wireguard
 
 volumes:
   warp-data:
 ```
 
-Run the container:
-```bash
-docker compose up -d
-```
+### ⚙️ Advanced Features
 
-### ⚙️ Advanced Configurations
-
-MicroWARP supports environment variables to customize your setup while keeping the memory footprint at 800KB:
+MicroWARP supports powerful environment variables to customize your setup:
 
 ```yaml
     environment:
-      - BIND_ADDR=0.0.0.0     # Bind address
-      - BIND_PORT=1080        # Custom SOCKS5 port
       - SOCKS_USER=admin      # Enable authentication
       - SOCKS_PASS=123456     # Auth password
-      
-      # ⚠️ Port Hopping (Mitigating Datacenter QoS):
-      # If your VPS is in a datacenter (e.g., DMIT, AWS) where UDP 2408 is throttled or blocked,
-      # use port 4500 (standard IPsec NAT-T) to bypass restrictive firewall rules.
-      - ENDPOINT_IP=162.159.192.1:4500 
+      - IPV6_MODE=dual        # '4' (default), '6' (IPv6 Only), or 'dual' (Dual Stack)
+      - AUTO_RENEW_DAYS=7     # Auto-rotate account every 7 days to prevent blocks
+      - ENDPOINT_IP=162.159.192.1:4500 # Port Hopping to bypass QoS in certain Datacenters
+```
+
+#### 🛡️ Scaleway / IPv6-Only VPS Setup
+If your server does not have a public IPv4 address, you must use Docker's host network and set `IPV6_MODE=6`. MicroWARP will automatically bind to Cloudflare's IPv6 endpoints:
+```yaml
+    network_mode: "host" # Replace 'ports' mapping with this
+    environment:
+      - IPV6_MODE=6
+      - GH_PROXY=https://ghproxy.net/ # Required to download wgcf via IPv4 GitHub
+```
+
+#### 🛠️ Built-in Diagnostic Tool
+Connection issues? Run the built-in diagnostic tool to quickly troubleshoot TUN permissions, wg0 status, and CF API reachability:
+```bash
+docker exec -it microwarp diag
 ```
 
 ---
@@ -107,27 +103,20 @@ MicroWARP supports environment variables to customize your setup while keeping t
 一个极简、高性能的 Cloudflare WARP SOCKS5 Docker 代理。
 致力于为服务器提供极低资源占用的出口网络解耦方案。
 
-### 🌟 为什么选择 MicroWARP？
-
-市面上大多数 WARP 镜像（例如 `caomingjun/warp`）依赖于 Cloudflare 官方的 `warp-cli` 守护进程。这种方式通常会导致较高的内存占用（约 **150MB+**），且在高并发场景下存在一定的性能瓶颈。
-
-**MicroWARP** 采用了不同的底层架构：
-1. **内核级 WireGuard**：采用 Linux 原生内核态的 `wg0` 接口接管流量，CPU 损耗近乎为零。
-2. **MicroSOCKS 引擎**：使用纯 C 语言编写的 `microsocks` 服务器，极大降低资源消耗。
-3. **极低内存占用**：高并发下内存占用依然 **< 5MB**（实测常驻 800KB 左右），专为资源受限的云服务器环境打造。
-4. **原生兼容 Tailscale**：智能保留回程路由，解决全局接管导致的非对称路由黑洞，兼容异地组网直连。
-5. **多架构支持**：原生支持 `amd64` 和 `arm64`（兼容 ARM 架构机器）。
+### ✨ 杀手级特性
+*   **零停机防限流重载**：后台每 7 天自动申请新账号，并通过 Linux 内核原生指令实现“毫秒级热替换”，正在看视频或下载的长连接**不会断开**，完美防范 CF 流量风控。
+*   **双栈 / 纯 IPv6 支持**：支持通过环境变量一键开启 纯 IPv4 (`4`)、纯 IPv6 (`6`) 或 全能双栈 (`dual`) 代理出站能力。
+*   **LXC / OVZ 无特权兼容**：智能检测宿主机环境。如果在受限的容器架构（无网卡特权）中启动，会自动平滑降级至用户态网络栈运行，告别崩溃报错。
+*   **CF-Team (Zero Trust) 接入**：无需复杂的脚本模拟登录，只需将提取好的团队版 `wg0.conf` 文件丢进配置卷，容器会自动挂载并连入企业专线！
 
 ### 🎯 典型应用场景
-**⚠️ 声明：本项目专为服务端 (Server-side) 设计，并非个人电脑本地代理软件。**
-
-1. **API 网络路由**：为服务器上的爬虫或大模型 API 网关（如 Grok / ChatGPT）提供稳定的 Cloudflare 出口 IP。
-2. **服务端出口隐私**：挂载 MicroWARP 作为服务器的出站网关，隐藏 VPS 真实 IP，降低遭到溯源扫描的风险。
-3. **微服务 Sidecar**：极低的资源占用使其非常适合作为 Docker Sidecar 容器，为特定的后端服务提供独立的网络出口。
+**⚠️ 声明：本项目专为服务端 (Server-side) 设计，绝对禁止在位于中国大陆境内的云服务器上运行，否则会导致封号封机。**
+1. **API 网络路由**：为爬虫或大模型 API 网关（如 Grok / ChatGPT）提供干净稳定的原生 Cloudflare 出口 IP。
+2. **服务端出口隐私**：挂载 MicroWARP 隐藏 VPS 真实 IP，降低遭到溯源扫描的风险。
 
 ### 📦 快速开始
 
-只需映射 `1080` 端口并赋予容器 `NET_ADMIN` 权限。新建一个 `docker-compose.yml`：
+新建一个 `docker-compose.yml`：
 
 ```yaml
 services:
@@ -136,49 +125,57 @@ services:
     container_name: microwarp
     restart: always
     ports:
-      - "127.0.0.1:1080:1080" # 默认无密码 SOCKS5 端口，仅监听本机
+      - "127.0.0.1:1080:1080" # 默认无密码，仅监听本机
+    
+    # KVM/物理机用户保留此权限以开启 800KB 内存模式。
+    # LXC/OVZ 用户若启动报错，请直接删除下方 4 行，程序将自动降级。
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
+      
     volumes:
-      - warp-data:/etc/wireguard # 持久化保存账号凭证
+      - warp-data:/etc/wireguard
 
 volumes:
   warp-data:
 ```
+启动容器：`docker compose up -d`
 
-启动容器：
-```bash
-docker compose up -d
-```
+### ⚙️ 进阶配置与高级玩法
 
-### ⚙️ 进阶配置：认证与网络连通性优化
-
-MicroWARP 支持通过环境变量进行参数定制：
+MicroWARP 支持通过环境变量解锁更强大的能力：
 
 ```yaml
     environment:
-      - BIND_ADDR=0.0.0.0     # 监听地址 (默认 0.0.0.0)
-      - BIND_PORT=1080        # 监听端口 (默认 1080)
       - SOCKS_USER=admin      # SOCKS5 认证用户名 (留空则为无密码模式)
       - SOCKS_PASS=123456     # SOCKS5 认证密码
-      - GH_PROXY=https://github.ednovas.xyz # 代理 wgcf 二进制下载地址
-      
-      # ⚠️ 网络连通性优化 (Port Hopping)
-      # 针对部分对 UDP 2408 端口存在 QoS 限制的机房（如 DMIT、搬瓦工等）。
-      # 可将端口修改为 4500 (标准 IPsec NAT-T 端口) 规避审查特征，提升连通率。
-      - ENDPOINT_IP=162.159.192.1:4500
+      - AUTO_RENEW_DAYS=7     # 开启零停机热重载，每 7 天自动更换一次账号
+      - IPV6_MODE=dual        # 出口网络支持：'4' (默认IPv4), '6' (纯IPv6), 或 'dual' (全能双栈)
+      - ENDPOINT_IP=162.159.192.1:4500 # 自定义 Endpoint 端口，绕过机房对 2408 UDP 的阻断
 ```
 
-### 🚀 扩展用法：转换为 HTTP 代理
+#### 🛡️ Scaleway 等纯 IPv6 机器配置指南
+如果你的 VPS 连 IPv4 地址都没有（瞎子 VPS），请勿配置 Docker 的复杂网络栈。直接使用宿主机网络并开启纯 v6 模式，MicroWARP 会自动寻找 CF 的 IPv6 接入点：
+```yaml
+    network_mode: "host" # 删除原有的 ports 映射，改为这行
+    environment:
+      - IPV6_MODE=6
+      - GH_PROXY=https://ghproxy.net/ # 纯 v6 机器必备，否则无法下载核心组件
+```
 
-基于 Unix 哲学，底层镜像未内置 HTTP 解析引擎以维持极限轻量化。如需 HTTP 代理，推荐使用 `gost` 进行本地转换：
+#### 🔑 如何使用 Cloudflare Zero Trust (Team版)？
+本项目原生支持外部配置文件。
+1. 在本地使用 `warp-cli` 或第三方工具提取出 Team 账户的配置文件。
+2. 将文件重命名为 `wg0.conf`。
+3. 替换掉宿主机 `warp-data` 目录中的同名文件并重启容器。程序会自动跳过注册流程，为你开启无限流量的 Team 专线！
+
+#### 🛠️ 一键排障工具
+如果代理无法连通，无需盲目猜测，进入容器执行内置自检脚本即可快速定位问题（TUN 权限、内核状态、CF 连通性）：
 ```bash
-nohup gost -F=socks5://admin:123456@127.0.0.1:1080 -L=http://127.0.0.1:8081 > /dev/null 2>&1 &
+docker exec -it microwarp diag
 ```
-*注：请务必使用 `socks5://`（而非 `socks5h://`）以由宿主机处理 DNS 解析，避免启动时的解析超时问题。*
 
 ---
 
