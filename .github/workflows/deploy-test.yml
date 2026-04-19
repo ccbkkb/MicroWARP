@@ -46,7 +46,7 @@ jobs:
           curl -v -m 10 -x socks5h://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace
           echo -e "\n✅ 重载前代理连通性测试通过！"
 
-      - name: 🏄 建立长连接测试 (KVM专属: 限速下载，跨越重载点)
+      - name: "🏄 建立长连接测试 (KVM专属 - 限速下载跨越重载点)"
         if: contains(matrix.env_name, 'KVM')
         run: |
           echo "正在后台发起限速长连接下载任务..."
@@ -75,7 +75,7 @@ jobs:
           echo "❌ 重载后服务未能恢复！"
           exit 1
 
-      - name: 🏄 验证长连接存活状态 (KVM 零停机极限测试)
+      - name: "🏄 验证长连接存活状态 (KVM 零停机极限测试)"
         if: contains(matrix.env_name, 'KVM')
         run: |
           echo "等待后台长连接下载任务结束 (预期总耗时 20s)..."
