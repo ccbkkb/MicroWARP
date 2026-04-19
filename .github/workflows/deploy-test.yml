@@ -26,7 +26,6 @@ jobs:
           docker build -t microwarp-test:local .
 
       - name: 🚀 部署并运行容器 (${{ matrix.env_name }})
-        # 注入 AUTO_RENEW_SECONDS=15 让它在 15 秒后立刻触发热重载
         run: |
           docker run -d \
             --name test-container \
@@ -43,19 +42,25 @@ jobs:
       - name: 🎯 测试 SOCKS5 短连接 (重载前)
         run: |
           echo "开始请求 SOCKS5 代理..."
-          curl -v -m 10 -x socks5h://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace
-          echo -e "\n✅ 重载前代理连通性测试通过！"
+          # 增加重试机制应对网络波动
+          for i in {1..3}; do
+            if curl -m 5 -s -x socks5h://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace | grep -q "warp="; then
+              echo -e "\n✅ 重载前代理连通性测试通过！"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "❌ 初始代理连通性测试失败！"
+          exit 1
 
       - name: "🏄 建立长连接测试 (KVM专属 - 限速下载跨越重载点)"
         if: contains(matrix.env_name, 'KVM')
         run: |
           echo "正在后台发起限速长连接下载任务..."
-          # 下载 Cloudflare 测速文件，限速 50KB/s，总大小 1MB，预期耗时约 20 秒
           curl -s -w "%{http_code}" --limit-rate 50k -x socks5h://127.0.0.1:1080 https://speed.cloudflare.com/__down?bytes=1000000 -o /dev/null > http_code.txt &
           echo $! > bg_pid.txt
 
       - name: ⏳ 等待触发热重载 (10秒)
-        # 上一步是第 10s，这里再等 10s，刚好跨过了第 15s 的重载触发点！
         run: |
           echo "等待 10 秒钟，容器内的 15 秒定时重载任务此时将被触发..."
           sleep 10
@@ -63,7 +68,6 @@ jobs:
       - name: 🎯 测试 SOCKS5 短连接 (重载后)
         run: |
           echo "开始请求 SOCKS5 代理 (重载后验证新账号)..."
-          # LXC 模式的重启可能需要 1-2 秒，加入带重试机制的优雅连通性测试
           for i in {1..5}; do
             if curl -m 5 -s -x socks5h://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace | grep -q "warp="; then
               echo -e "\n✅ 重载后新连接测试通过！账号已成功无缝切换。"
@@ -80,24 +84,31 @@ jobs:
         run: |
           echo "等待后台长连接下载任务结束 (预期总耗时 20s)..."
           PID=$(cat bg_pid.txt)
-          
-          # 【修复】改用 kill -0 轮询跨 Shell 监控后台进程
           while kill -0 $PID 2>/dev/null; do
             sleep 1
           done
           
-          if [ -s http_code.txt ]; then
-            CODE=$(cat http_code.txt)
-          else
-            CODE="000"
-          fi
+          if [ -s http_code.txt ]; then CODE=$(cat http_code.txt); else CODE="000"; fi
           
-          if[ "$CODE" = "200" ]; then
+          if [ "$CODE" = "200" ]; then
             echo -e "\n✅ 太强了！在底层公私钥被完全替换的情况下，现有的 SOCKS5 长连接[0 毫秒] 掉线，完美存活！"
           else
             echo -e "\n❌ 长连接测试失败！发生断流，HTTP 状态码: $CODE"
             exit 1
           fi
+
+      - name: "🔍 死亡快照 (仅在测试失败时执行)"
+        if: failure()
+        run: |
+          echo "========================================="
+          echo "    致命错误排查：容器内部网络状态快照    "
+          echo "========================================="
+          echo -e "\n---> IP 路由表:"
+          docker exec test-container ip route || true
+          echo -e "\n---> IP 地址分配:"
+          docker exec test-container ip addr || true
+          echo -e "\n---> WireGuard 握手状态 (如果为空说明被墙):"
+          docker exec test-container wg show || true
 
       - name: 📜 打印容器启动完整日志
         if: always()
