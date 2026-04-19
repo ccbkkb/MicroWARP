@@ -96,7 +96,7 @@ generate_new_warp() {
     # 1. 应对 CF 限流的注册重试机制 (最多 5 次)
     RETRY=0
     MAX_RETRY=5
-    while[ ! -f "wgcf-account.toml" ]; do
+    while [ ! -f "wgcf-account.toml" ]; do
         wgcf register --accept-tos > /dev/null 2>&1 || true
         if [ ! -f "wgcf-account.toml" ]; then
             RETRY=$((RETRY+1))
@@ -112,7 +112,7 @@ generate_new_warp() {
     
     # 2. 应对生成失败的配置重试机制 (最多 5 次)
     RETRY_GEN=0
-    while[ ! -f "wgcf-profile.conf" ]; do
+    while [ ! -f "wgcf-profile.conf" ]; do
         wgcf generate > /dev/null 2>&1 || true
         if [ ! -f "wgcf-profile.conf" ]; then
             RETRY_GEN=$((RETRY_GEN+1))
@@ -243,7 +243,7 @@ if [ "$USE_FALLBACK" = "0" ]; then
     log_info "当前出口 IP (内核模式):" "Current outbound IP (Kernel mode):"
     curl -s -m 5 https://1.1.1.1/cdn-cgi/trace | grep ip= || log_warn "获取超时，底层隧道可能遭遇延迟" "Fetch timeout"
 
-    if [ -n "$SOCKS_USER" ] &&[ -n "$SOCKS_PASS" ]; then
+    if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
         log_info "身份认证已开启 (User: $SOCKS_USER)" "Authentication enabled."
         log_step "MicroSOCKS 引擎已启动，监听 ${LISTEN_ADDR}:${LISTEN_PORT}" "MicroSOCKS engine started."
         exec microsocks -i "$LISTEN_ADDR" -p "$LISTEN_PORT" -u "$SOCKS_USER" -P "$SOCKS_PASS"
