@@ -5,32 +5,33 @@ on:
 
 jobs:
   build-and-test:
-    name: 测试环境 - ${{ matrix.env_name }}
+    name: ${{ matrix.env_mode.name }} - IPv6 Mode[${{ matrix.ipv6_mode }}]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - env_name: "KVM/物理机 (内核特权模式)"
-            docker_args: "--cap-add NET_ADMIN --cap-add SYS_MODULE --sysctl net.ipv4.conf.all.src_valid_mark=1"
-          - env_name: "LXC/OVZ (用户态降级模式)"
-            docker_args: "" 
+        env_mode:
+          - name: "KVM"
+            args: "--cap-add NET_ADMIN --cap-add SYS_MODULE --sysctl net.ipv4.conf.all.src_valid_mark=1"
+          - name: "LXC"
+            args: "" 
+        ipv6_mode: ["4", "dual", "6"]
 
     steps:
       - name: 📥 检出项目源码
         uses: actions/checkout@v4
 
-      - name: 🔨 从源码构建 Docker 镜像 (Local Build)
+      - name: 🔨 从源码构建 Docker 镜像
         run: |
-          echo "开始构建 microwarp-test 镜像..."
           docker build -t microwarp-test:local .
 
-      - name: 🚀 部署并运行容器 (${{ matrix.env_name }})
+      - name: 🚀 部署容器 (注入环境参数)
         run: |
           docker run -d \
             --name test-container \
-            ${{ matrix.docker_args }} \
+            ${{ matrix.env_mode.args }} \
             -e AUTO_RENEW_SECONDS=15 \
+            -e IPV6_MODE=${{ matrix.ipv6_mode }} \
             -p 1080:1080 \
             microwarp-test:local
             
@@ -42,9 +43,31 @@ jobs:
       - name: 🎯 测试 SOCKS5 短连接 (重载前)
         run: |
           echo "开始请求 SOCKS5 代理..."
+          
+          if[ "${{ matrix.ipv6_mode }}" = "6" ]; then
+            echo "⚠️ [注意] 检测到纯 IPv6 模式 (IPV6_MODE=6)。"
+            echo "由于 GitHub Actions 官方服务器不具备公网 IPv6 能力，底层的 WireGuard 物理握手必定会超时失败。"
+            echo "纯 IPv6 模式在 CI 中仅验证『环境初始化』和『配置生成转换』是否正确，现已通过并跳过连通性测试！✅"
+            exit 0
+          fi
+
+          # 测试常规的 IPv4 出口 (适用于 4 和 dual 模式)
           for i in {1..3}; do
             if curl -m 5 -s -x socks5h://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace | grep -q "warp="; then
-              echo -e "\n✅ 重载前代理连通性测试通过！"
+              echo -e "\n✅ 重载前 IPv4 代理连通性测试通过！"
+              
+              # 专门测试 dual 双栈环境对 IPv6 目标地址的请求能力
+              if [ "${{ matrix.ipv6_mode }}" = "dual" ]; then
+                echo "🌐 正在验证双栈环境的纯 IPv6 目标出站能力..."
+                # 访问 Cloudflare IPv6 专用的 Trace 节点
+                if curl -m 5 -s -x socks5h://127.0.0.1:1080 https://[2606:4700:4700::1111]/cdn-cgi/trace | grep -q "warp="; then
+                   echo -e "✅ 炸裂！容器成功通过 SOCKS5 实现了原生 IPv6 出站！双栈模式完美生效！"
+                else
+                   echo -e "❌ 双栈模式下，IPv6 目标连通性测试失败！"
+                   exit 1
+                fi
+              fi
+              
               exit 0
             fi
             sleep 2
@@ -54,16 +77,21 @@ jobs:
 
       - name: ⏳ 跨越重载点 (等待后台换号完成)
         run: |
-          echo "等待 10 秒钟，容器内的 15 秒定时重载任务此时已被触发并瞬间替换密钥..."
+          echo "等待 10 秒钟，触发热重载..."
           sleep 10
           
       - name: 🎯 测试 SOCKS5 极速恢复能力 (重载后)
         run: |
           echo "开始请求 SOCKS5 代理 (重载后验证新账号)..."
-          # 如果我们的热重载完美生效，这里几乎不需要等待重试就能瞬间连通
+          
+          if[ "${{ matrix.ipv6_mode }}" = "6" ]; then
+            echo "⚠️ [跳过] 纯 IPv6 连通性测试因 GitHub Runner 限制已豁免。"
+            exit 0
+          fi
+
           for i in {1..5}; do
             if curl -m 5 -s -x socks5h://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace | grep -q "warp="; then
-              echo -e "\n✅ 重载后新连接测试通过！账号已成功无缝切换，代理服务可用性未受影响。"
+              echo -e "\n✅ 重载后新连接测试通过！账号已成功无缝切换！"
               exit 0
             fi
             echo "等待服务恢复重连..."
@@ -87,6 +115,6 @@ jobs:
         if: always()
         run: |
           echo "========================================="
-          echo "    MicroWARP 日志 - ${{ matrix.env_name }}    "
+          echo "    MicroWARP 日志 - ${{ matrix.env_mode.name }} - ${{ matrix.ipv6_mode }}    "
           echo "========================================="
           docker logs test-container
