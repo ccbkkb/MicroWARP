@@ -38,10 +38,10 @@ A minimalist, high-performance Cloudflare WARP SOCKS5 proxy in Docker.
 Designed as a lightweight drop-in replacement for standard WARP proxy images.
 
 ### ✨ Feature Highlights
-*   **Zero-Downtime Auto-Renew**: Automatically requests a new free account every 7 days and performs a hot-reload without breaking existing connections to prevent CF rate-limiting.
-*   **IPv6 Dual Stack Ready**: Natively supports IPv4 only (`4`), IPv6 only (`6`), and full dual-stack (`dual`) routing out of the box.
-*   **LXC / OVZ Auto-Fallback**: Automatically detects if the host has `NET_ADMIN` privileges. If not (e.g., LXC containers), it seamlessly degrades to userspace mode (`wireproxy`) to ensure 100% compatibility.
-*   **Cloudflare Zero Trust (Teams) Support**: Drop your own `wg0.conf` into the volume to bypass registration and connect directly to your Team network.
+*   **Automated Account Rotation**: Automatically requests a new free account in the background every 7 days by default, achieving "millisecond-level replacement" via native Linux kernel commands.
+*   **Dual-Stack Network Support**: Enable IPv4-only (`4`) or full Dual-Stack (`dual`) outbound proxy capabilities out of the box via a single environment variable.
+*   **LXC / OVZ Unprivileged Compatibility**: Automatically detects the host environment. If deployed in restricted container architectures (without network interface privileges), it seamlessly falls back to a userspace network stack, completely eliminating crash errors.
+*   **Cloudflare Zero Trust (Teams) Support**: No complex login simulation scripts required. Simply drop your extracted `wg0.conf` Team profile into the config volume, and the container will automatically mount it and route your traffic through the enterprise network!
 
 ### 📦 Quick Start
 
@@ -104,10 +104,10 @@ docker exec -it microwarp diag
 致力于为服务器提供极低资源占用的出口网络解耦方案。
 
 ### ✨ 杀手级特性
-*   **零停机防限流重载**：后台每 7 天自动申请新账号，并通过 Linux 内核原生指令实现“毫秒级热替换”，正在看视频或下载的长连接**不会断开**，完美防范 CF 流量风控。
-*   **双栈 / 纯 IPv6 支持**：支持通过环境变量一键开启 纯 IPv4 (`4`)、纯 IPv6 (`6`) 或 全能双栈 (`dual`) 代理出站能力。
-*   **LXC / OVZ 无特权兼容**：智能检测宿主机环境。如果在受限的容器架构（无网卡特权）中启动，会自动平滑降级至用户态网络栈运行，告别崩溃报错。
-*   **CF-Team (Zero Trust) 接入**：无需复杂的脚本模拟登录，只需将提取好的团队版 `wg0.conf` 文件丢进配置卷，容器会自动挂载并连入企业专线！
+*   **账户自动化注册轮换**：后台默认每 7 天自动申请新账号，并通过 Linux 内核原生指令实现“毫秒级替换”。
+*   **双栈3网络支持**：支持通过环境变量一键开启 纯 IPv4 (`4`) / 双栈 (`dual`) 代理出站能力。
+*   **LXC / OVZ 无特权兼容**：自动检测宿主机环境。如果在受限的容器架构（无网卡特权）中启动，会自动平滑降级至用户态网络栈运行，告别崩溃报错。
+*   **CF-Team (Zero Trust) 接入**：无需复杂的脚本模拟登录，只需将提取好的团队版 `wg0.conf` 文件放进配置卷，容器会自动挂载并连入企业专线！
 
 ### 🎯 典型应用场景
 **⚠️ 声明：本项目专为服务端 (Server-side) 设计，绝对禁止在位于中国大陆境内的云服务器上运行，否则会导致封号封机。**
