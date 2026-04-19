@@ -14,7 +14,7 @@ jobs:
           - env_name: "KVM/物理机 (内核特权模式)"
             docker_args: "--cap-add NET_ADMIN --cap-add SYS_MODULE --sysctl net.ipv4.conf.all.src_valid_mark=1"
           - env_name: "LXC/OVZ (用户态降级模式)"
-            docker_args: "" 
+            docker_args: ""
 
     steps:
       - name: 📥 检出项目源码
