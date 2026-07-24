@@ -4,10 +4,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 > *请严格遵守您所在国家和地区的法律法规。任何因违法违规使用本项目而引发的法律纠纷或后果，均与本项目及作者无关。*
-> 
+>
 > *Please strictly comply with the laws and regulations of your country and region. Any legal disputes or consequences arising from illegal use of this project have nothing to do with this project and its authors.*
 
-[English](#english) |[中文说明](#chinese)
+[English](#english) | [中文说明](#chinese) | [日本語](README.ja.md)
 
 ### 📊 Performance Comparison
 
@@ -34,7 +34,7 @@ Here is a real-world performance test on a 1C1G (1 vCPU, 1GB RAM) VPS, comparing
 <a name="english"></a>
 ## 🇬🇧 English
 
-A minimalist, high-performance Cloudflare WARP SOCKS5 proxy in Docker. 
+A minimalist, high-performance Cloudflare WARP SOCKS5 proxy in Docker.
 Designed as a lightweight drop-in replacement for standard WARP proxy images (e.g., `caomingjun/warp`).
 
 ### 🌟 Why MicroWARP?
@@ -92,11 +92,11 @@ MicroWARP supports environment variables to customize your setup while keeping t
       - BIND_PORT=1080        # Custom SOCKS5 port
       - SOCKS_USER=admin      # Enable authentication
       - SOCKS_PASS=123456     # Auth password
-      
+
       # ⚠️ Port Hopping (Mitigating Datacenter QoS):
       # If your VPS is in a datacenter (e.g., DMIT, AWS) where UDP 2408 is throttled or blocked,
       # use port 4500 (standard IPsec NAT-T) to bypass restrictive firewall rules.
-      - ENDPOINT_IP=162.159.192.1:4500 
+      - ENDPOINT_IP=162.159.192.1:4500
 ```
 
 ---
@@ -165,7 +165,7 @@ MicroWARP 支持通过环境变量进行参数定制：
       - SOCKS_USER=admin      # SOCKS5 认证用户名 (留空则为无密码模式)
       - SOCKS_PASS=123456     # SOCKS5 认证密码
       - GH_PROXY=https://github.ednovas.xyz # 代理 wgcf 二进制下载地址
-      
+
       # ⚠️ 网络连通性优化 (Port Hopping)
       # 针对部分对 UDP 2408 端口存在 QoS 限制的机房（如 DMIT、搬瓦工等）。
       # 可将端口修改为 4500 (标准 IPsec NAT-T 端口) 规避审查特征，提升连通率。
