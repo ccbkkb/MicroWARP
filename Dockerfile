@@ -1,27 +1,41 @@
 # ==========================================
-# 阶段 1：极速编译 MicroSOCKS 引擎
+# Stage 1: Build microsocks (pure C SOCKS5)
 # ==========================================
-FROM alpine:latest AS builder
-# 安装 C 语言编译环境
+FROM alpine:3.21 AS builder
+
 RUN apk add --no-cache build-base git
-# 从官方仓库拉取源码并编译 (只需 2 秒)
-RUN git clone https://github.com/rofl0r/microsocks.git /src && \
-    cd /src && make
+
+ARG MICROSOCKS_REF=master
+RUN git clone --depth 1 --branch "${MICROSOCKS_REF}" \
+        https://github.com/rofl0r/microsocks.git /src \
+    && make -C /src
 
 # ==========================================
-# 阶段 2：极净运行环境
+# Stage 2: Minimal runtime
 # ==========================================
-FROM alpine:latest
+FROM alpine:3.21
 
-# 仅安装必要的内核级 WireGuard 和网络控制工具
-RUN apk add --no-cache wireguard-tools iptables iproute2 wget curl
+# iptables package ships both iptables & ip6tables on Alpine.
+# openresolv satisfies resolvconf calls from some wg-quick code paths.
+RUN apk add --no-cache \
+        wireguard-tools \
+        iptables \
+        iproute2 \
+        curl \
+        wget \
+        ca-certificates \
+        openresolv \
+    && update-ca-certificates \
+    && rm -rf /var/cache/apk/*
 
-# 打包microsocks
 COPY --from=builder /src/microsocks /usr/local/bin/microsocks
 
 WORKDIR /app
 COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh
+RUN chmod +x entrypoint.sh \
+    && mkdir -p /etc/wireguard
 
-# 启动引擎
+EXPOSE 1080/tcp
+VOLUME ["/etc/wireguard"]
+
 CMD ["./entrypoint.sh"]
