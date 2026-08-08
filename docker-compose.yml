@@ -1,8 +1,7 @@
-version: '3.8'
-
 services:
   microwarp:
     image: ghcr.io/ccbkkb/microwarp:latest
+    # build: .   # uncomment to build from local sources
     container_name: microwarp
     restart: always
     ports:
@@ -11,24 +10,30 @@ services:
       - NET_ADMIN
       - SYS_MODULE
     sysctls:
+      # Required for WireGuard mark-based routing
       - net.ipv4.conf.all.src_valid_mark=1
+      # Dual-stack: allow IPv6 inside the container network namespace
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv6.conf.default.disable_ipv6=0
+      - net.ipv6.conf.all.forwarding=1
     # environment:
-    #   - BIND_ADDR=0.0.0.0           # SOCKS5 监听地址，默认 0.0.0.0
-    #   - BIND_PORT=1080              # SOCKS5 监听端口，默认 1080
-    #   - SOCKS_USER=admin            # SOCKS5 认证用户名，留空则为无密码模式
-    #   - SOCKS_PASS=123456           # SOCKS5 认证密码，需与 SOCKS_USER 同时设置
-    #   - ENDPOINT_IP=162.159.192.1:4500  # 自定义 WARP 节点 IP，用于绕过 HK/US 机房的 CF reserved 字节阻断
-    #   - GH_PROXY=https://github.ednovas.xyz  # GitHub 代理前缀，仅用于加速 wgcf 二进制下载
-    #   - TAILSCALE_CIDR=100.64.0.0/10     # Tailscale 回程路由 CIDR，默认 100.64.0.0/10，非 Tailscale 场景无需设置
-    #   - MICROWARP_TEST_MODE=0       # 测试模式，设为 1 时跳过所有初始化逻辑，用于 CI/调试
-    
-    # 日志轮换限制，保留3个历史文件，每个最大3MB
+    #   - BIND_ADDR=0.0.0.0              # SOCKS5 listen address (use :: for dual-stack listen)
+    #   - BIND_PORT=1080                 # SOCKS5 listen port
+    #   - SOCKS_USER=admin               # optional auth username
+    #   - SOCKS_PASS=123456              # optional auth password
+    #   - ENABLE_IPV6=1                  # 1/true = dual-stack WARP (default); 0 = IPv4 only
+    #   - MTU=1280                       # WireGuard MTU
+    #   - KEEPALIVE=15                   # PersistentKeepalive seconds
+    #   - ENDPOINT_IP=162.159.192.1:4500 # custom WARP endpoint (IPv4 host:port or [IPv6]:port)
+    #   - GH_PROXY=https://github.ednovas.xyz  # GitHub proxy prefix for wgcf download
+    #   - TAILSCALE_CIDR=100.64.0.0/10   # IPv4 mesh return path CIDR
+    #   - TAILSCALE_CIDR_V6=fd7a:115c:a1e0::/48  # IPv6 mesh return path CIDR
+    #   - MICROWARP_TEST_MODE=0          # 1 = skip init (CI)
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
         max-size: "3m"
         max-file: "3"
-        
     volumes:
       - warp-data:/etc/wireguard
 
