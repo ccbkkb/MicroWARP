@@ -19,7 +19,9 @@ KEEPALIVE="${KEEPALIVE:-15}"
 # Fallback when GitHub API is unavailable / rate-limited
 WGCF_FALLBACK_VER="${WGCF_FALLBACK_VER:-2.2.29}"
 CURL_TIMEOUT="${CURL_TIMEOUT:-15}"
-TRACE_TIMEOUT="${TRACE_TIMEOUT:-5}"
+# Keep egress probe short so it never delays SOCKS readiness
+TRACE_TIMEOUT="${TRACE_TIMEOUT:-3}"
+TRACE_CONNECT_TIMEOUT="${TRACE_CONNECT_TIMEOUT:-2}"
 
 # ==========================================
 # Logging helpers
@@ -41,6 +43,19 @@ fi
 # ==========================================
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+# Run a command with a hard wall-clock limit when possible.
+# Usage: run_with_timeout SECONDS command [args...]
+run_with_timeout() {
+    secs="$1"
+    shift
+    if command_exists timeout; then
+        timeout "$secs" "$@" 2>/dev/null && return 0
+        timeout -t "$secs" "$@" 2>/dev/null && return 0
+        return 1
+    fi
+    "$@"
 }
 
 github_auth_header() {
@@ -137,6 +152,11 @@ is_truthy() {
     esac
 }
 
+iface_has_global_ipv6() {
+    dev="$1"
+    ip -6 addr show dev "$dev" scope global 2>/dev/null | grep -q 'inet6 '
+}
+
 # ==========================================
 # 1. Account registration / config bootstrap
 # ==========================================
@@ -158,12 +178,12 @@ register_warp() {
     chmod +x "$workdir/wgcf"
 
     log "正在向 Cloudflare 注册设备..."
-    # wgcf writes account next to CWD
+    # wgcf writes account next to CWD; silence both stdout and stderr noise
     if ! (
         cd "$workdir"
-        ./wgcf register --accept-tos >/dev/null
+        ./wgcf register --accept-tos >/dev/null 2>&1
         log "正在生成 WireGuard 配置..."
-        ./wgcf generate >/dev/null
+        ./wgcf generate >/dev/null 2>&1
     ); then
         die "wgcf 注册或配置生成失败"
     fi
@@ -361,10 +381,16 @@ install_policy_routes() {
     fi
 }
 
+# Best-effort egress IP print. Must never block SOCKS startup for long.
+# Prefer numeric Cloudflare endpoints to avoid DNS hangs on broken stacks.
 show_egress_ip() {
     log "当前出口探测："
+
     v4_ok=0
-    if out="$(curl -4 -sS -m "$TRACE_TIMEOUT" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)"; then
+    # 1.1.1.1 is numeric — no DNS required
+    if out="$(run_with_timeout "$((TRACE_TIMEOUT + 1))" \
+        curl -4 -sS --connect-timeout "$TRACE_CONNECT_TIMEOUT" -m "$TRACE_TIMEOUT" \
+        https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)"; then
         ip_line="$(printf '%s\n' "$out" | grep '^ip=' || true)"
         if [ -n "$ip_line" ]; then
             log "  IPv4 ${ip_line}"
@@ -372,7 +398,9 @@ show_egress_ip() {
         fi
     fi
     if [ "$v4_ok" -eq 0 ]; then
-        if out="$(curl -4 -sS -m "$TRACE_TIMEOUT" https://1.1.1.1/cdn-cgi/trace 2>/dev/null)"; then
+        if out="$(run_with_timeout "$((TRACE_TIMEOUT + 1))" \
+            curl -4 -sS --connect-timeout "$TRACE_CONNECT_TIMEOUT" -m "$TRACE_TIMEOUT" \
+            https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"; then
             ip_line="$(printf '%s\n' "$out" | grep '^ip=' || true)"
             if [ -n "$ip_line" ]; then
                 log "  IPv4 ${ip_line}"
@@ -385,8 +413,16 @@ show_egress_ip() {
     fi
 
     if is_truthy "$ENABLE_IPV6"; then
+        if ! iface_has_global_ipv6 "$WG_IFACE"; then
+            warn "IPv6：${WG_IFACE} 无全局地址，跳过探测"
+            return 0
+        fi
         v6_ok=0
-        if out="$(curl -6 -sS -m "$TRACE_TIMEOUT" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)"; then
+        # Prefer numeric IPv6 trace endpoint when possible
+        if out="$(run_with_timeout "$((TRACE_TIMEOUT + 1))" \
+            curl -6 -sS --connect-timeout "$TRACE_CONNECT_TIMEOUT" -m "$TRACE_TIMEOUT" \
+            --resolve www.cloudflare.com:443:2606:4700::0011 \
+            https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"; then
             ip_line="$(printf '%s\n' "$out" | grep '^ip=' || true)"
             if [ -n "$ip_line" ]; then
                 log "  IPv6 ${ip_line}"
@@ -394,7 +430,7 @@ show_egress_ip() {
             fi
         fi
         if [ "$v6_ok" -eq 0 ]; then
-            warn "IPv6 出口探测失败（若宿主机/Docker 未开 IPv6 属正常）"
+            warn "IPv6 出口探测失败（隧道未就绪或目标不可达，SOCKS 仍可使用）"
         fi
     fi
 }
@@ -435,7 +471,15 @@ main() {
     capture_pre_warp_routes
     bring_up_wg
     install_policy_routes
-    show_egress_ip
+
+    # CRITICAL: bring up SOCKS before any optional network probes.
+    # CI / orchestrators often hit the published port as soon as the
+    # container is "running"; blocking on curl here caused RST (no listener).
+    #
+    # Probe in background so logs still show egress IP without delaying bind.
+    # stdout/stderr stay on the container log stream.
+    show_egress_ip &
+    # Give the listener a moment to appear in parallel with probe scheduling
     start_socks
 }
 
