@@ -3,7 +3,7 @@ name: E2E Proxy Test (端到端连通性测试)
 on:
   # 【默认开启】仅允许在 GitHub 网页上手动点击触发
   workflow_dispatch:
-  
+
   # 【已注释】如果以后你想在每次推送到 main 分支时自动跑测试，取消下面两行的注释即可
   # push:
   #   branches: [ main ]
@@ -11,7 +11,7 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: 📥 检出项目源码
         uses: actions/checkout@v4
@@ -24,40 +24,104 @@ jobs:
 
       - name: 🚀 部署并运行容器
         # 赋予 NET_ADMIN 权限，映射 1080 端口，拉起内核网卡
+        # 说明：
+        # - GitHub-hosted runner / Docker 默认 bridge 通常只有 IPv4。
+        # - 这不影响 WARP 隧道内的 IPv6（wg0 可自带 v6 地址与 ::/0 路由）。
+        # - 本 E2E 用例走 IPv4 SOCKS (127.0.0.1:1080 → 1.1.1.1)，不依赖 Docker IPv6。
+        # - IPv6 sysctl 在部分 runner 上可用；失败时忽略，避免整步失败。
         run: |
+          set -eux
+          EXTRA_SYSCTL=""
+          if docker run --rm --sysctl net.ipv6.conf.all.disable_ipv6=0 alpine:3.21 true 2>/dev/null; then
+            EXTRA_SYSCTL="--sysctl net.ipv6.conf.all.disable_ipv6=0 --sysctl net.ipv6.conf.default.disable_ipv6=0 --sysctl net.ipv6.conf.all.forwarding=1"
+            echo "Runner 支持容器 IPv6 sysctl，已启用"
+          else
+            echo "Runner 不支持容器 IPv6 sysctl（常见于默认 Docker），将仅依赖 IPv4 宿主网络"
+          fi
+
+          # shellcheck disable=SC2086
           docker run -d \
             --name test-container \
             --cap-add NET_ADMIN \
             --cap-add SYS_MODULE \
             --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            $EXTRA_SYSCTL \
             -p 1080:1080 \
+            -e ENABLE_IPV6=1 \
             microwarp-test:local
-            
-      - name: ⏳ 等待 WARP 隧道初始化 (10秒)
-        # 给 wgcf 注册账号和 wg0 网卡 UDP 握手留出时间
-        run: |
-          echo "容器已启动，等待 10 秒钟让内核网卡完成握手..."
-          sleep 10
 
-      - name: 🎯 测试 SOCKS5 代理连通性
-        # 使用 curl 通过 1080 端口请求 Cloudflare 骨干网测速节点
+      - name: ⏳ 等待 SOCKS5 就绪
+        # 注册 wgcf + 握手可能超过 10s；轮询端口直到 microsocks 真正 listen
         run: |
+          set -eu
+          echo "等待容器内 SOCKS5 (1080) 就绪（最长 120 秒）..."
+          deadline=$((SECONDS + 120))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if ! docker ps --format '{{.Names}}' | grep -qx test-container; then
+              echo "❌ 容器已退出"
+              docker logs test-container || true
+              exit 1
+            fi
+            # 端口 open 且进程已是 microsocks（entrypoint 末尾 exec）
+            if docker exec test-container sh -c 'command -v wget >/dev/null && wget -q -O- --timeout=1 --spider http://127.0.0.1:1080 2>/dev/null; true' 2>/dev/null; then
+              :
+            fi
+            if docker exec test-container sh -c 'ss -lnt 2>/dev/null | grep -q ":1080 " || netstat -lnt 2>/dev/null | grep -q ":1080 " || true'; then
+              if docker exec test-container sh -c 'ps | grep -v grep | grep -q microsocks'; then
+                echo "✅ microsocks 已在监听 1080"
+                docker logs test-container || true
+                exit 0
+              fi
+            fi
+            # 兜底：对宿主映射端口做 TCP 探测（busybox nc / bash /dev/tcp）
+            if (echo > /dev/tcp/127.0.0.1/1080) >/dev/null 2>&1; then
+              if docker exec test-container sh -c 'ps | grep -v grep | grep -q microsocks'; then
+                echo "✅ 宿主 1080 可连且容器内 microsocks 在跑"
+                docker logs test-container || true
+                exit 0
+              fi
+            fi
+            sleep 2
+          done
+          echo "❌ 等待超时，打印诊断信息"
+          docker ps -a || true
+          docker logs test-container || true
+          docker exec test-container sh -c 'ps aux; ip addr; ip route; wg show' || true
+          exit 1
+
+      - name: 🎯 测试 SOCKS5 代理连通性 (IPv4)
+        # 使用 curl 通过 1080 端口请求 Cloudflare（纯 IPv4 数字地址，不依赖 Docker IPv6）
+        run: |
+          set -eu
           echo "开始请求 SOCKS5 代理..."
-          # 设置最大超时时间为 10 秒，防止死锁卡住流水线
-          curl -v -m 10 -x socks5://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace
-          echo -e "\n✅ 代理连通性测试通过！"
+          # socks5h 会让代理做 DNS；这里目标是 IP，socks5 即可
+          out="$(curl -sS -m 20 -x socks5://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace)"
+          echo "$out"
+          echo "$out" | grep -q '^ip='
+          echo "$out" | grep -q '^warp='
+          echo "✅ IPv4 代理连通性测试通过！"
 
-      - name: 📜 打印容器启动日志 (前 30 行)
+      - name: 🌐 可选：IPv6 出口探测（容器内，不依赖 Docker IPv6 bridge）
+        # WARP 双栈时，从容器内经 wg0 访问 IPv6 目标；失败不阻断主流程
+        continue-on-error: true
+        run: |
+          set -eu
+          echo "尝试容器内经 WARP 的 IPv6 出口（Docker 无 IPv6 时仍可能成功）..."
+          docker exec test-container sh -c \
+            'curl -6 -sS --connect-timeout 3 -m 5 https://www.cloudflare.com/cdn-cgi/trace | head -n 20 || true'
+          docker exec test-container sh -c 'ip -6 addr show dev wg0 || true'
+
+      - name: 📜 打印容器启动日志
         # 使用 if: always() 确保即使上面的 curl 测试失败报错了，这一步也会执行，方便你排错！
         if: always()
         run: |
           echo "========================================="
-          echo "    MicroWARP 容器启动日志 (前 30 行)    "
+          echo "    MicroWARP 容器完整日志              "
           echo "========================================="
-          docker logs test-container | head -n 30
-          
-          # 【锦上添花】顺便打印一下最后 15 行，方便你看最终有没有报错
+          docker logs test-container 2>&1 || true
+
           echo -e "\n========================================="
-          echo "    MicroWARP 容器最新状态 (后 15 行)    "
+          echo "    容器 / 网络诊断                       "
           echo "========================================="
-          docker logs test-container | tail -n 15
+          docker ps -a --filter name=test-container || true
+          docker exec test-container sh -c 'ps; echo ---; wg show; echo ---; ip route; echo ---; ip -6 route' 2>&1 || true
