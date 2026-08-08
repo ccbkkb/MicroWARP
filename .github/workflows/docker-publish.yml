@@ -2,8 +2,8 @@ name: Build and Publish MicroWARP
 
 # ==========================================
 # 触发条件：
-# 1. 发布 Release 版本时自动构建 (打标签)
-# 2. 手动点击触发按钮 (方便随时测试打包)
+# 1. 发布 Release 时自动构建，并补齐 Release notes（Describe this release）
+# 2. 手动点击触发 (workflow_dispatch)
 # ==========================================
 on:
   release:
@@ -12,19 +12,135 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    
+
     permissions:
-      contents: read
+      contents: write   # 更新 Release body 需要写权限
       packages: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Normalize image name (lowercase)
+        run: |
+          echo "IMAGE_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      # ------------------------------------------
+      # Release 发布时：自动补齐 "Describe this release"
+      # - body 为空 / 占位 → 项目简介 + GitHub generate-notes
+      # - body 已有内容 → 保留用户原文，必要时追加 changelog
+      # ------------------------------------------
+      - name: Auto-fill Release notes (Describe this release)
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          RELEASE_ID: ${{ github.event.release.id }}
+          RELEASE_NAME: ${{ github.event.release.name }}
+          TARGET: ${{ github.event.release.target_commitish }}
+          CURRENT_BODY: ${{ github.event.release.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+
+          echo "Tag: $TAG  Release id: $RELEASE_ID"
+
+          if [ -z "${TARGET:-}" ]; then
+            TARGET=main
+          fi
+
+          # body 是否实质为空（空、仅空白、或常见占位文案）
+          BODY_TRIMMED="$(printf '%s' "${CURRENT_BODY:-}" | tr -d ' \t\r\n')"
+          NEED_FILL=0
+          if [ -z "$BODY_TRIMMED" ]; then
+            NEED_FILL=1
+          fi
+          case "${CURRENT_BODY:-}" in
+            *"Describe this release"*|*"Write a description"*|*"Add release notes"*)
+              NEED_FILL=1
+              ;;
+          esac
+
+          # GitHub 官方生成 Release notes
+          # https://docs.github.com/en/rest/releases/releases#generate-release-notes-content-for-a-release
+          GEN_JSON="$(curl -fsSL -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}/releases/generate-notes" \
+            -d "$(jq -n --arg tag "$TAG" --arg target "$TARGET" \
+              '{tag_name:$tag, target_commitish:$target}')" \
+            || true)"
+
+          GEN_NAME="$(printf '%s' "$GEN_JSON" | jq -r '.name // empty')"
+          GEN_BODY="$(printf '%s' "$GEN_JSON" | jq -r '.body // empty')"
+
+          IMAGE_REF="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]'):${TAG#v}"
+
+          # 用 printf 拼 intro，避免 heredoc 缩进污染
+          DEFAULT_INTRO="$(printf '%s\n' \
+            '## MicroWARP' \
+            '' \
+            '极简、高性能的 Cloudflare WARP SOCKS5 Docker 代理（内核 WireGuard + pure C microsocks）。' \
+            '支持 **IPv4 / IPv6 双栈**，常驻内存约 **800KB**。' \
+            '' \
+            '```bash' \
+            "docker pull ${IMAGE_REF}" \
+            '```' \
+            '' \
+            "详见 [README](https://github.com/${REPO}#readme)。")"
+
+          patch_release() {
+            # $1 = jq object fields as JSON object string, e.g. {"body":"..."}
+            curl -fsSL -X PATCH \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" \
+              -d "$1" >/dev/null
+          }
+
+          if [ "$NEED_FILL" -eq 1 ]; then
+            echo "==> Release body 为空或为占位，自动生成完整说明"
+
+            if [ -n "$GEN_BODY" ]; then
+              FINAL_BODY="$(printf '%s\n\n---\n\n%s\n' "$DEFAULT_INTRO" "$GEN_BODY")"
+            else
+              FINAL_BODY="$(printf '%s\n\n---\n\n### Changes\n\n- Release `%s`\n' "$DEFAULT_INTRO" "$TAG")"
+            fi
+
+            patch_release "$(jq -n --arg body "$FINAL_BODY" '{body:$body}')"
+
+            # name 为空或等于 tag 时，用 generate-notes 的标题
+            if [ -n "$GEN_NAME" ]; then
+              if [ -z "${RELEASE_NAME:-}" ] || [ "$RELEASE_NAME" = "$TAG" ]; then
+                patch_release "$(jq -n --arg name "$GEN_NAME" '{name:$name}')" || true
+              fi
+            fi
+
+            echo "✅ 已写入自动生成的 Release notes"
+            printf '%s\n' "$FINAL_BODY" | head -n 50
+          else
+            echo "==> 用户已填写 Release 说明，保留原文"
+
+            if [ -n "$GEN_BODY" ]; then
+              if printf '%s' "$CURRENT_BODY" | grep -qiE 'Full Changelog|## What.?s Changed|## Changes'; then
+                echo "原文已含变更区块，跳过追加"
+              else
+                MERGED="$(printf '%s\n\n---\n\n%s\n' "$CURRENT_BODY" "$GEN_BODY")"
+                patch_release "$(jq -n --arg body "$MERGED" '{body:$body}')"
+                echo "✅ 已在用户说明后追加 auto-generated changelog"
+              fi
+            else
+              echo "generate-notes 无额外内容，保持用户原文不变"
+            fi
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -44,18 +160,21 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          labels: |
+            org.opencontainers.image.title=MicroWARP
+            org.opencontainers.image.description=Minimalist high-performance Cloudflare WARP SOCKS5 proxy (dual-stack IPv4/IPv6)
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: |
-            # 1. 如果是打 Tag 发版，生成严格的版本号标签 (如 1.0.0)
             type=semver,pattern={{version}}
-            
-            # 2. 【核心隔离】仅当 Push 到 main/master，或发版时，才打 latest 标签！
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'release' }}
-            
-            # 3. 【新增分支】仅当 Push 到 dev 分支时，才打 dev 标签！(绝不污染 latest)
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=sha,prefix=sha-,format=short,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
