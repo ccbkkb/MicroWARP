@@ -1,5 +1,6 @@
 #!/bin/sh
 # MicroWARP entrypoint — dual-stack Cloudflare WARP SOCKS5 proxy
+# Protocols: WireGuard (kernel, default) | MASQUE (usque userspace)
 # shellcheck shell=sh
 set -eu
 
@@ -22,6 +23,25 @@ CURL_TIMEOUT="${CURL_TIMEOUT:-15}"
 # Keep egress probe short so it never delays SOCKS readiness
 TRACE_TIMEOUT="${TRACE_TIMEOUT:-3}"
 TRACE_CONNECT_TIMEOUT="${TRACE_CONNECT_TIMEOUT:-2}"
+
+# Tunnel protocol: wireguard (default) | masque
+# Aliases: wg → wireguard; usque → masque
+TUNNEL_PROTOCOL="${TUNNEL_PROTOCOL:-wireguard}"
+
+# MASQUE / usque
+# Config co-located under /etc/wireguard so existing warp-data volume persists it.
+USQUE_CONFIG="${USQUE_CONFIG:-/etc/wireguard/masque-config.json}"
+# l4-socks = lighter TCP-only (recommended); socks = full gVisor L3 (TCP+UDP, heavier)
+MASQUE_PROXY_MODE="${MASQUE_PROXY_MODE:-l4-socks}"
+MASQUE_HTTP2="${MASQUE_HTTP2:-0}"
+MASQUE_SNI="${MASQUE_SNI:-}"
+MASQUE_MTU="${MASQUE_MTU:-}"
+# Optional identity extras
+WARP_JWT="${WARP_JWT:-}"
+WARP_LICENSE="${WARP_LICENSE:-}"
+USQUE_DEVICE_NAME="${USQUE_DEVICE_NAME:-MicroWARP}"
+# Cap Go runtime RSS on small VPS (MASQUE path only; ignored by WireGuard path)
+GOMEMLIMIT="${GOMEMLIMIT:-512MiB}"
 
 # ==========================================
 # Logging helpers
@@ -157,11 +177,29 @@ iface_has_global_ipv6() {
     ip -6 addr show dev "$dev" scope global 2>/dev/null | grep -q 'inet6 '
 }
 
+normalize_tunnel_protocol() {
+    raw="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$raw" in
+        wireguard|wg|wg0|kernel) printf 'wireguard' ;;
+        masque|usque|h3|http3|quic) printf 'masque' ;;
+        *) die "未知 TUNNEL_PROTOCOL='$1'（支持: wireguard | masque）" ;;
+    esac
+}
+
+normalize_masque_proxy_mode() {
+    raw="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$raw" in
+        l4|l4-socks|l4_socks|l4socks) printf 'l4-socks' ;;
+        socks|full|gvisor|l3) printf 'socks' ;;
+        *) die "未知 MASQUE_PROXY_MODE='$1'（支持: l4-socks | socks）" ;;
+    esac
+}
+
 # ==========================================
-# 1. Account registration / config bootstrap
+# 1. Account registration / config bootstrap (WireGuard / wgcf)
 # ==========================================
 register_warp() {
-    log "未检测到配置，正在全自动初始化 Cloudflare WARP..."
+    log "未检测到配置，正在全自动初始化 Cloudflare WARP (WireGuard)..."
 
     arch="$(detect_arch)"
     ver="$(fetch_latest_wgcf_version)"
@@ -436,7 +474,7 @@ show_egress_ip() {
 }
 
 # ==========================================
-# 4. Launch microsocks
+# 4. Launch microsocks (WireGuard path)
 # ==========================================
 start_socks() {
     # Default 0.0.0.0 keeps legacy IPv4-only listen.
@@ -455,9 +493,134 @@ start_socks() {
 }
 
 # ==========================================
-# Main
+# 5. MASQUE path (usque)
 # ==========================================
-main() {
+register_masque() {
+    command_exists usque || die "镜像内未找到 usque，无法使用 MASQUE 模式"
+
+    conf_dir="$(dirname "$USQUE_CONFIG")"
+    mkdir -p "$conf_dir"
+
+    if [ -f "$USQUE_CONFIG" ] && [ -s "$USQUE_CONFIG" ]; then
+        log "检测到已有 MASQUE 配置: ${USQUE_CONFIG}"
+        return 0
+    fi
+
+    log "未检测到 MASQUE 配置，正在通过 usque 注册 Cloudflare WARP 设备..."
+    # usque writes config next to -c path; -a accepts ToS non-interactively
+    set -- usque -c "$USQUE_CONFIG" register -a
+    if [ -n "$USQUE_DEVICE_NAME" ]; then
+        set -- "$@" -n "$USQUE_DEVICE_NAME"
+    fi
+    if [ -n "$WARP_JWT" ]; then
+        log "使用 Zero Trust JWT 注册"
+        set -- "$@" --jwt "$WARP_JWT"
+    fi
+
+    if ! "$@"; then
+        die "usque register 失败（可能触发 Cloudflare 限流，请稍后重试并确保 volume 持久化配置）"
+    fi
+
+    [ -f "$USQUE_CONFIG" ] && [ -s "$USQUE_CONFIG" ] || \
+        die "usque register 后未生成配置: $USQUE_CONFIG"
+
+    log "MASQUE 设备注册成功 → ${USQUE_CONFIG}"
+}
+
+# Best-effort license bind (WARP+). Failures are non-fatal.
+maybe_apply_warp_license() {
+    [ -n "$WARP_LICENSE" ] || return 0
+    command_exists usque || return 0
+
+    log "尝试绑定 WARP+ license..."
+    # usque CLI evolves; try a few known shapes, never abort the proxy.
+    if usque -c "$USQUE_CONFIG" license "$WARP_LICENSE" >/dev/null 2>&1; then
+        log "WARP+ license 已应用 (license 子命令)"
+        return 0
+    fi
+    if usque -c "$USQUE_CONFIG" account license "$WARP_LICENSE" >/dev/null 2>&1; then
+        log "WARP+ license 已应用 (account license)"
+        return 0
+    fi
+    # Some builds expose --license on register/enroll only; document for re-register.
+    warn "当前 usque 构建可能不支持运行时 license 绑定；若需 WARP+ 请查阅 usque 文档或重新注册"
+}
+
+start_masque_socks() {
+    command_exists usque || die "镜像内未找到 usque"
+
+    proxy_mode="$(normalize_masque_proxy_mode "$MASQUE_PROXY_MODE")"
+    log "协议: MASQUE (usque)  代理模式: ${proxy_mode}"
+
+    # Soft-cap Go heap on small hosts (no effect if runtime ignores it)
+    if [ -n "${GOMEMLIMIT:-}" ]; then
+        export GOMEMLIMIT
+        log "GOMEMLIMIT=${GOMEMLIMIT}"
+    fi
+
+    # Global -c must precede subcommand
+    set -- usque -c "$USQUE_CONFIG" "$proxy_mode" -b "$LISTEN_ADDR" -p "$LISTEN_PORT"
+
+    if [ -n "${SOCKS_USER:-}" ] && [ -n "${SOCKS_PASS:-}" ]; then
+        log "🔒 身份认证已开启 (User: ${SOCKS_USER})"
+        set -- "$@" -u "$SOCKS_USER" -w "$SOCKS_PASS"
+    else
+        warn "未设置 SOCKS_USER/SOCKS_PASS，当前为公开访问模式"
+    fi
+
+    # HTTP/2 (TCP:443) fallback — only on full socks / modes that support it.
+    # L4 modes currently do not support --http2 (usque limitation).
+    if is_truthy "$MASQUE_HTTP2"; then
+        if [ "$proxy_mode" = "l4-socks" ]; then
+            warn "MASQUE_HTTP2=1 但 l4-socks 不支持 --http2；请改 MASQUE_PROXY_MODE=socks，或关闭 HTTP2"
+        else
+            log "启用 MASQUE HTTP/2 (TCP) 回退"
+            set -- "$@" --http2
+        fi
+    fi
+
+    # SNI override (full socks); L4 rejects custom SNI on CF side
+    if [ -n "$MASQUE_SNI" ]; then
+        if [ "$proxy_mode" = "l4-socks" ]; then
+            warn "MASQUE_SNI 在 l4-socks 下无效，已忽略"
+        else
+            log "MASQUE SNI=${MASQUE_SNI}"
+            set -- "$@" -s "$MASQUE_SNI"
+        fi
+    fi
+
+    if [ -n "$MASQUE_MTU" ]; then
+        if [ "$proxy_mode" = "l4-socks" ]; then
+            warn "MASQUE_MTU 在 l4-socks 下无效，已忽略"
+        else
+            set -- "$@" -m "$MASQUE_MTU"
+        fi
+    fi
+
+    # Optional IPv4/IPv6 tunnel toggles via usque flags when full socks
+    if [ "$proxy_mode" = "socks" ]; then
+        if ! is_truthy "$ENABLE_IPV6"; then
+            # usque socks: -S often means IPv6 off / family select — keep portable:
+            # Prefer documented no-tunnel-ipv6 style if present; otherwise leave default.
+            if usque socks --help 2>&1 | grep -q 'no-tunnel-ipv6'; then
+                set -- "$@" --no-tunnel-ipv6
+            fi
+        fi
+    fi
+
+    log "🚀 usque ${proxy_mode} 监听 ${LISTEN_ADDR}:${LISTEN_PORT}"
+    if is_truthy "$MASQUE_HTTP2" && [ "$proxy_mode" = "socks" ]; then
+        log "   流量经 Cloudflare MASQUE (HTTP/2 TCP :443)"
+    else
+        log "   流量经 Cloudflare MASQUE (HTTP/3 QUIC :443)"
+    fi
+    exec "$@"
+
+}
+
+run_wireguard_path() {
+    log "协议: WireGuard (内核 wg0) — 默认轻量路径"
+
     mkdir -p "$WG_DIR"
 
     if [ ! -f "$WG_CONF" ]; then
@@ -473,14 +636,34 @@ main() {
     install_policy_routes
 
     # CRITICAL: bring up SOCKS before any optional network probes.
-    # CI / orchestrators often hit the published port as soon as the
-    # container is "running"; blocking on curl here caused RST (no listener).
-    #
-    # Probe in background so logs still show egress IP without delaying bind.
-    # stdout/stderr stay on the container log stream.
     show_egress_ip &
-    # Give the listener a moment to appear in parallel with probe scheduling
     start_socks
+}
+
+run_masque_path() {
+    log "协议: MASQUE — 用户态 usque (兼容抗封锁 / UDP 被 QoS 场景)"
+    warn "MASQUE 为用户态 QUIC，内存远高于内核 WireGuard（建议 GOMEMLIMIT，默认可 512MiB）"
+
+    conf_dir="$(dirname "$USQUE_CONFIG")"
+    mkdir -p "$conf_dir"
+
+    register_masque
+    maybe_apply_warp_license
+    start_masque_socks
+}
+
+# ==========================================
+# Main
+# ==========================================
+main() {
+    proto="$(normalize_tunnel_protocol "$TUNNEL_PROTOCOL")"
+    log "TUNNEL_PROTOCOL=${proto}"
+
+    case "$proto" in
+        wireguard) run_wireguard_path ;;
+        masque)    run_masque_path ;;
+        *)         die "内部错误: 未处理的协议 $proto" ;;
+    esac
 }
 
 main "$@"
