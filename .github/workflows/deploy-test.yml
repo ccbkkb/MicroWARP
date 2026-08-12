@@ -3,6 +3,15 @@ name: E2E Proxy Test (端到端连通性测试)
 on:
   # 【默认开启】仅允许在 GitHub 网页上手动点击触发
   workflow_dispatch:
+    inputs:
+      run_wireguard:
+        description: "Run WireGuard (kernel) E2E"
+        type: boolean
+        default: true
+      run_masque:
+        description: "Run MASQUE (usque) E2E"
+        type: boolean
+        default: true
 
   # 【已注释】如果以后你想在每次推送到 main 分支时自动跑测试，取消下面两行的注释即可
   # push:
@@ -18,110 +27,300 @@ jobs:
 
       - name: 🔨 从源码构建 Docker 镜像 (Local Build)
         # 不拉取 ghcr，直接用当前目录的 Dockerfile 和 entrypoint.sh 现场编译
-        run: |
-          echo "开始构建 microwarp-test 镜像..."
-          docker build -t microwarp-test:local .
-
-      - name: 🚀 部署并运行容器
-        # 赋予 NET_ADMIN 权限，映射 1080 端口，拉起内核网卡
-        # 说明：
-        # - GitHub-hosted runner / Docker 默认 bridge 通常只有 IPv4。
-        # - 这不影响 WARP 隧道内的 IPv6（wg0 可自带 v6 地址与 ::/0 路由）。
-        # - 本 E2E 用例走 IPv4 SOCKS (127.0.0.1:1080 → 1.1.1.1)，不依赖 Docker IPv6。
-        # - IPv6 sysctl 在部分 runner 上可用；失败时忽略，避免整步失败。
+        # 构建阶段会下载 usque 预编译包，需网络可达 GitHub Releases
         run: |
           set -eux
-          EXTRA_SYSCTL=""
-          if docker run --rm --sysctl net.ipv6.conf.all.disable_ipv6=0 alpine:3.21 true 2>/dev/null; then
-            EXTRA_SYSCTL="--sysctl net.ipv6.conf.all.disable_ipv6=0 --sysctl net.ipv6.conf.default.disable_ipv6=0 --sysctl net.ipv6.conf.all.forwarding=1"
-            echo "Runner 支持容器 IPv6 sysctl，已启用"
-          else
-            echo "Runner 不支持容器 IPv6 sysctl（常见于默认 Docker），将仅依赖 IPv4 宿主网络"
-          fi
+          echo "开始构建 microwarp-test 镜像（含 microsocks + usque）..."
+          docker build -t microwarp-test:local .
+          docker run --rm microwarp-test:local sh -c 'command -v microsocks && command -v usque && usque version || usque --help | head -n 5'
 
+      # ------------------------------------------
+      # Shared helpers as env-less shell snippets
+      # ------------------------------------------
+      - name: 🧰 写入测试辅助脚本
+        run: |
+          cat > /tmp/microwarp-e2e-helpers.sh << 'EOF'
+          #!/bin/sh
+          set -eu
+
+          # Detect whether the runner allows IPv6-related container sysctls.
+          detect_extra_sysctl() {
+            if docker run --rm --sysctl net.ipv6.conf.all.disable_ipv6=0 alpine:3.21 true 2>/dev/null; then
+              printf '%s' "--sysctl net.ipv6.conf.all.disable_ipv6=0 --sysctl net.ipv6.conf.default.disable_ipv6=0 --sysctl net.ipv6.conf.all.forwarding=1"
+              echo "Runner 支持容器 IPv6 sysctl，已启用" >&2
+            else
+              echo "Runner 不支持容器 IPv6 sysctl（常见于默认 Docker），将仅依赖 IPv4 宿主网络" >&2
+            fi
+          }
+
+          # Wait until SOCKS is up.
+          # Usage: wait_socks NAME HOST_PORT CONTAINER_PORT PROC_REGEX [TIMEOUT_SEC]
+          # HOST_PORT = published port on the runner; CONTAINER_PORT = listen port inside (usually 1080).
+          wait_socks() {
+            name="$1"
+            host_port="$2"
+            cport="$3"
+            proc_re="$4"
+            timeout_sec="${5:-180}"
+            echo "等待 ${name} SOCKS5 host:${host_port}→container:${cport}（最长 ${timeout_sec}s，进程: ${proc_re}）..."
+            deadline=$((SECONDS + timeout_sec))
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              if ! docker ps --format '{{.Names}}' | grep -qx "$name"; then
+                echo "❌ 容器 ${name} 已退出"
+                docker logs "$name" || true
+                return 1
+              fi
+              listening=0
+              if docker exec "$name" sh -c 'ss -lnt 2>/dev/null | grep -q ":'"$cport"' " || netstat -lnt 2>/dev/null | grep -q ":'"$cport"' "'; then
+                listening=1
+              elif (echo >"/dev/tcp/127.0.0.1/${host_port}") >/dev/null 2>&1; then
+                listening=1
+              fi
+              if [ "$listening" -eq 1 ]; then
+                if docker exec "$name" sh -c "ps 2>/dev/null | grep -v grep | grep -Eq '${proc_re}'"; then
+                  echo "✅ ${name}: SOCKS 引擎就绪 (host ${host_port} / container ${cport})"
+                  docker logs "$name" 2>&1 | tail -n 40 || true
+                  return 0
+                fi
+              fi
+              sleep 2
+            done
+            echo "❌ ${name} 等待超时"
+            docker ps -a --filter "name=${name}" || true
+            docker logs "$name" 2>&1 || true
+            docker exec "$name" sh -c 'ps; echo ---; ip addr; ip route; ip -6 route; command -v wg >/dev/null && wg show || true' 2>&1 || true
+            return 1
+          }
+
+
+          # IPv4 SOCKS → Cloudflare trace must show warp=
+          # Usage: test_socks_ipv4 PORT LABEL
+          test_socks_ipv4() {
+            port="$1"
+            label="$2"
+            echo "===== ${label}: IPv4 SOCKS → https://1.1.1.1/cdn-cgi/trace ====="
+            out="$(curl -sS -m 30 -x "socks5://127.0.0.1:${port}" https://1.1.1.1/cdn-cgi/trace)"
+            echo "$out"
+            echo "$out" | grep -q '^ip='
+            echo "$out" | grep -q '^warp='
+            echo "✅ ${label} IPv4 代理连通性通过 (warp=$(echo "$out" | sed -n 's/^warp=//p'))"
+          }
+
+          # IPv6 via SOCKS (proxy resolves / dials v6 inside WARP tunnel).
+          # Does NOT require Docker bridge IPv6 — only that the tunnel has v6 egress.
+          # Usage: test_socks_ipv6 PORT LABEL [REQUIRED=0]
+          test_socks_ipv6() {
+            port="$1"
+            label="$2"
+            required="${3:-0}"
+            echo "===== ${label}: IPv6 via SOCKS5h → cloudflare.com/cdn-cgi/trace ====="
+            set +e
+            out="$(curl -sS -m 45 -6 -x "socks5h://127.0.0.1:${port}" \
+              https://www.cloudflare.com/cdn-cgi/trace 2>&1)"
+            rc=$?
+            set -e
+            echo "$out"
+            if [ "$rc" -eq 0 ] && echo "$out" | grep -q '^ip=' && echo "$out" | grep -q '^warp='; then
+              echo "✅ ${label} IPv6 代理连通性通过 (ip=$(echo "$out" | sed -n 's/^ip=//p'))"
+              return 0
+            fi
+            # Fallback: numeric IPv6 target (no DNS), socks5 (not h)
+            set +e
+            out2="$(curl -sS -m 45 -x "socks5://127.0.0.1:${port}" \
+              --resolve "www.cloudflare.com:443:2606:4700:4700::1111" \
+              https://www.cloudflare.com/cdn-cgi/trace 2>&1)"
+            rc2=$?
+            set -e
+            echo "$out2"
+            if [ "$rc2" -eq 0 ] && echo "$out2" | grep -q '^ip=' && echo "$out2" | grep -q '^warp='; then
+              echo "✅ ${label} IPv6 代理连通性通过 (numeric resolve fallback)"
+              return 0
+            fi
+            if [ "$required" = "1" ]; then
+              echo "❌ ${label} IPv6 测试失败（required）"
+              return 1
+            fi
+            echo "⚠️  ${label} IPv6 出口探测失败（不阻断；部分账号/节点可能无 v6 或 runner 限制）"
+            return 0
+          }
+
+          dump_diag() {
+            name="$1"
+            echo "========================================="
+            echo "  诊断: ${name}"
+            echo "========================================="
+            docker ps -a --filter "name=${name}" || true
+            docker logs "$name" 2>&1 || true
+            docker exec "$name" sh -c \
+              'ps; echo ---; ip addr; echo ---; ip route; echo ---; ip -6 route; echo ---; command -v wg >/dev/null && wg show || true; echo ---; ls -la /etc/wireguard 2>/dev/null || true' \
+              2>&1 || true
+          }
+          EOF
+          chmod +x /tmp/microwarp-e2e-helpers.sh
+
+      # ==========================================
+      # Job path A: WireGuard (kernel, default)
+      # ==========================================
+      - name: "🟢 WireGuard: 启动容器"
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_wireguard }}
+        run: |
+          set -eux
+          # shellcheck disable=SC1091
+          . /tmp/microwarp-e2e-helpers.sh
+          EXTRA_SYSCTL="$(detect_extra_sysctl || true)"
+          docker rm -f test-wg >/dev/null 2>&1 || true
           # shellcheck disable=SC2086
           docker run -d \
-            --name test-container \
+            --name test-wg \
             --cap-add NET_ADMIN \
             --cap-add SYS_MODULE \
             --sysctl net.ipv4.conf.all.src_valid_mark=1 \
             $EXTRA_SYSCTL \
             -p 1080:1080 \
+            -e TUNNEL_PROTOCOL=wireguard \
             -e ENABLE_IPV6=1 \
             microwarp-test:local
 
-      - name: ⏳ 等待 SOCKS5 就绪
-        # 注册 wgcf + 握手可能超过 10s；轮询端口直到 microsocks 真正 listen
+      - name: "🟢 WireGuard: 等待 SOCKS5"
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_wireguard }}
         run: |
           set -eu
-          echo "等待容器内 SOCKS5 (1080) 就绪（最长 120 秒）..."
-          deadline=$((SECONDS + 120))
-          while [ "$SECONDS" -lt "$deadline" ]; do
-            if ! docker ps --format '{{.Names}}' | grep -qx test-container; then
-              echo "❌ 容器已退出"
-              docker logs test-container || true
-              exit 1
-            fi
-            # 端口 open 且进程已是 microsocks（entrypoint 末尾 exec）
-            if docker exec test-container sh -c 'command -v wget >/dev/null && wget -q -O- --timeout=1 --spider http://127.0.0.1:1080 2>/dev/null; true' 2>/dev/null; then
-              :
-            fi
-            if docker exec test-container sh -c 'ss -lnt 2>/dev/null | grep -q ":1080 " || netstat -lnt 2>/dev/null | grep -q ":1080 " || true'; then
-              if docker exec test-container sh -c 'ps | grep -v grep | grep -q microsocks'; then
-                echo "✅ microsocks 已在监听 1080"
-                docker logs test-container || true
-                exit 0
-              fi
-            fi
-            # 兜底：对宿主映射端口做 TCP 探测（busybox nc / bash /dev/tcp）
-            if (echo > /dev/tcp/127.0.0.1/1080) >/dev/null 2>&1; then
-              if docker exec test-container sh -c 'ps | grep -v grep | grep -q microsocks'; then
-                echo "✅ 宿主 1080 可连且容器内 microsocks 在跑"
-                docker logs test-container || true
-                exit 0
-              fi
-            fi
-            sleep 2
-          done
-          echo "❌ 等待超时，打印诊断信息"
-          docker ps -a || true
-          docker logs test-container || true
-          docker exec test-container sh -c 'ps aux; ip addr; ip route; wg show' || true
-          exit 1
+          . /tmp/microwarp-e2e-helpers.sh
+          wait_socks test-wg 1080 1080 'microsocks' 180
 
-      - name: 🎯 测试 SOCKS5 代理连通性 (IPv4)
-        # 使用 curl 通过 1080 端口请求 Cloudflare（纯 IPv4 数字地址，不依赖 Docker IPv6）
+
+      - name: "🟢 WireGuard: IPv4 SOCKS 连通性"
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_wireguard }}
         run: |
           set -eu
-          echo "开始请求 SOCKS5 代理..."
-          # socks5h 会让代理做 DNS；这里目标是 IP，socks5 即可
-          out="$(curl -sS -m 20 -x socks5://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace)"
-          echo "$out"
-          echo "$out" | grep -q '^ip='
-          echo "$out" | grep -q '^warp='
-          echo "✅ IPv4 代理连通性测试通过！"
+          . /tmp/microwarp-e2e-helpers.sh
+          test_socks_ipv4 1080 "WireGuard"
 
-      - name: 🌐 可选：IPv6 出口探测（容器内，不依赖 Docker IPv6 bridge）
-        # WARP 双栈时，从容器内经 wg0 访问 IPv6 目标；失败不阻断主流程
+      - name: "🟢 WireGuard: IPv6 出口（SOCKS + 容器内 wg0）"
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_wireguard }}
         continue-on-error: true
         run: |
           set -eu
-          echo "尝试容器内经 WARP 的 IPv6 出口（Docker 无 IPv6 时仍可能成功）..."
-          docker exec test-container sh -c \
-            'curl -6 -sS --connect-timeout 3 -m 5 https://www.cloudflare.com/cdn-cgi/trace | head -n 20 || true'
-          docker exec test-container sh -c 'ip -6 addr show dev wg0 || true'
+          . /tmp/microwarp-e2e-helpers.sh
+          # 1) Through published SOCKS (preferred — end-to-end client path)
+          test_socks_ipv6 1080 "WireGuard" 0
+          # 2) Direct from inside container via kernel wg0 (no Docker IPv6 bridge needed)
+          echo "----- 容器内 curl -6 via wg0 -----"
+          docker exec test-wg sh -c \
+            'curl -6 -sS --connect-timeout 3 -m 8 https://www.cloudflare.com/cdn-cgi/trace | head -n 20 || true'
+          docker exec test-wg sh -c 'ip -6 addr show dev wg0 || true'
 
-      - name: 📜 打印容器启动日志
-        # 使用 if: always() 确保即使上面的 curl 测试失败报错了，这一步也会执行，方便你排错！
+      - name: "🟢 WireGuard: 诊断日志"
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_wireguard) }}
+        run: |
+          . /tmp/microwarp-e2e-helpers.sh
+          dump_diag test-wg || true
+
+      - name: "🟢 WireGuard: 清理容器"
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_wireguard) }}
+        run: docker rm -f test-wg >/dev/null 2>&1 || true
+
+      # ==========================================
+      # Job path B: MASQUE (usque userspace)
+      # ==========================================
+      - name: "🟣 MASQUE: 启动容器"
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_masque }}
+        run: |
+          set -eux
+          . /tmp/microwarp-e2e-helpers.sh
+          EXTRA_SYSCTL="$(detect_extra_sysctl || true)"
+          docker rm -f test-masque >/dev/null 2>&1 || true
+          # MASQUE 不依赖内核 WireGuard 模块，但仍给 NET_ADMIN 以兼容镜像默认 cap 叙事。
+          # 使用 full socks（gVisor L3）以便 IPv6 / 双栈更稳；HTTP3 默认 UDP:443。
+          # shellcheck disable=SC2086
+          docker run -d \
+            --name test-masque \
+            --cap-add NET_ADMIN \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            $EXTRA_SYSCTL \
+            -p 1081:1080 \
+            -e TUNNEL_PROTOCOL=masque \
+            -e MASQUE_PROXY_MODE=socks \
+            -e ENABLE_IPV6=1 \
+            -e GOMEMLIMIT=512MiB \
+            -e USQUE_DEVICE_NAME=MicroWARP-CI \
+            -e BIND_ADDR=0.0.0.0 \
+            -e BIND_PORT=1080 \
+            microwarp-test:local
+
+      - name: "🟣 MASQUE: 等待 SOCKS5"
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_masque }}
+        run: |
+          set -eu
+          . /tmp/microwarp-e2e-helpers.sh
+          # usque register + QUIC 握手可能更慢；宿主 1081 → 容器 1080
+          wait_socks test-masque 1081 1080 'usque' 240
+
+
+      - name: "🟣 MASQUE: IPv4 SOCKS 连通性"
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_masque }}
+        run: |
+          set -eu
+          . /tmp/microwarp-e2e-helpers.sh
+          test_socks_ipv4 1081 "MASQUE"
+
+      - name: "🟣 MASQUE: IPv6 经 SOCKS 出口"
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_masque }}
+        # IPv6 在部分 free 账号 / Anycast 路径上可能不稳定；默认不阻断主流程。
+        # 若要强制失败，把最后一个参数改为 1。
+        continue-on-error: true
+        run: |
+          set -eu
+          . /tmp/microwarp-e2e-helpers.sh
+          test_socks_ipv6 1081 "MASQUE" 0
+          echo "----- 容器进程 / 配置 -----"
+          docker exec test-masque sh -c 'ps; ls -la /etc/wireguard; head -c 200 /etc/wireguard/masque-config.json 2>/dev/null || true' || true
+
+      - name: "🟣 MASQUE: l4-socks 轻量模式冒烟（可选）"
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_masque }}
+        continue-on-error: true
+        run: |
+          set -eux
+          . /tmp/microwarp-e2e-helpers.sh
+          EXTRA_SYSCTL="$(detect_extra_sysctl || true)"
+          docker rm -f test-masque-l4 >/dev/null 2>&1 || true
+          # 复用已注册的 masque-config：从 test-masque 拷出（若仍在）或重新 register
+          # 这里独立 volume-less 跑一次 l4，接受重新 register 的限流风险；失败不阻断。
+          # shellcheck disable=SC2086
+          docker run -d \
+            --name test-masque-l4 \
+            --cap-add NET_ADMIN \
+            $EXTRA_SYSCTL \
+            -p 1082:1080 \
+            -e TUNNEL_PROTOCOL=masque \
+            -e MASQUE_PROXY_MODE=l4-socks \
+            -e GOMEMLIMIT=256MiB \
+            -e USQUE_DEVICE_NAME=MicroWARP-CI-L4 \
+            microwarp-test:local
+          wait_socks test-masque-l4 1082 1080 'usque' 240
+          test_socks_ipv4 1082 "MASQUE-l4"
+
+          docker rm -f test-masque-l4 >/dev/null 2>&1 || true
+
+      - name: "🟣 MASQUE: 诊断日志"
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_masque) }}
+        run: |
+          . /tmp/microwarp-e2e-helpers.sh
+          dump_diag test-masque || true
+          dump_diag test-masque-l4 || true
+
+      - name: "🟣 MASQUE: 清理容器"
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_masque) }}
+        run: |
+          docker rm -f test-masque test-masque-l4 >/dev/null 2>&1 || true
+
+      - name: 📊 汇总
         if: always()
         run: |
           echo "========================================="
-          echo "    MicroWARP 容器完整日志              "
+          echo " MicroWARP E2E 完成"
+          echo "  - WireGuard: 默认内核路径 (microsocks + wg0)"
+          echo "  - MASQUE:    usque socks / l4-socks"
+          echo "  - IPv4:      经宿主映射端口强制校验 warp="
+          echo "  - IPv6:      经 SOCKS 隧道探测（continue-on-error）"
           echo "========================================="
-          docker logs test-container 2>&1 || true
-
-          echo -e "\n========================================="
-          echo "    容器 / 网络诊断                       "
-          echo "========================================="
-          docker ps -a --filter name=test-container || true
-          docker exec test-container sh -c 'ps; echo ---; wg show; echo ---; ip route; echo ---; ip -6 route' 2>&1 || true
