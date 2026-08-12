@@ -17,24 +17,35 @@ services:
       - net.ipv6.conf.default.disable_ipv6=0
       - net.ipv6.conf.all.forwarding=1
     # environment:
-    #   - BIND_ADDR=0.0.0.0              # SOCKS5 listen address (use :: for dual-stack listen)
-    #   - BIND_PORT=1080                 # SOCKS5 listen port
-    #   - SOCKS_USER=admin               # optional auth username
-    #   - SOCKS_PASS=123456              # optional auth password
-    #   - ENABLE_IPV6=1                  # 1/true = dual-stack WARP (default); 0 = IPv4 only
-    #   - MTU=1280                       # WireGuard MTU
-    #   - KEEPALIVE=15                   # PersistentKeepalive seconds
-    #   - ENDPOINT_IP=162.159.192.1:4500 # custom WARP endpoint (IPv4 host:port or [IPv6]:port)
+    #   # --- protocol ---
+    #   - TUNNEL_PROTOCOL=wireguard   # wireguard (default, kernel) | masque (usque)
+    #   - MASQUE_PROXY_MODE=l4-socks  # l4-socks (TCP-only, lighter) | socks (gVisor L3)
+    #   - MASQUE_HTTP2=0              # 1 = TCP/HTTP2 fallback (needs MASQUE_PROXY_MODE=socks)
+    #   - MASQUE_SNI=                 # optional SNI override (full socks only)
+    #   - GOMEMLIMIT=512MiB           # soft cap Go RSS on MASQUE path
+    #   - WARP_JWT=                   # Zero Trust team token (MASQUE register)
+    #   - WARP_LICENSE=               # optional WARP+ key
+    #   - USQUE_DEVICE_NAME=MicroWARP
+    #   # --- common ---
+    #   - BIND_ADDR=0.0.0.0           # SOCKS5 listen address (use :: for dual-stack listen)
+    #   - BIND_PORT=1080              # SOCKS5 listen port
+    #   - SOCKS_USER=admin            # optional auth username
+    #   - SOCKS_PASS=123456           # optional auth password
+    #   - ENABLE_IPV6=1               # 1/true = dual-stack WARP (default); 0 = IPv4 only
+    #   - MTU=1280                    # WireGuard MTU
+    #   - KEEPALIVE=15                # PersistentKeepalive seconds
+    #   - ENDPOINT_IP=162.159.192.1:4500 # custom WARP endpoint (WireGuard only)
     #   - GH_PROXY=https://github.ednovas.xyz  # GitHub proxy prefix for wgcf download
     #   - TAILSCALE_CIDR=100.64.0.0/10   # IPv4 mesh return path CIDR
     #   - TAILSCALE_CIDR_V6=fd7a:115c:a1e0::/48  # IPv6 mesh return path CIDR
-    #   - MICROWARP_TEST_MODE=0          # 1 = skip init (CI)
+    #   - MICROWARP_TEST_MODE=0       # 1 = skip init (CI)
     logging:
       driver: json-file
       options:
         max-size: "3m"
         max-file: "3"
     volumes:
+      # Persists wg0.conf (WireGuard) and masque-config.json (MASQUE)
       - warp-data:/etc/wireguard
 
 volumes:
