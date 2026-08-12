@@ -7,29 +7,61 @@ body:
     attributes:
       value: |
         ### [MUST READ] Please read carefully before submitting / [必读] 提交前请务必仔细阅读
-        
+
         Thank you for using MicroWARP! Most connection issues are strongly related to the host's network environment.
         感谢您使用 MicroWARP！绝大多数连接问题与宿主机的网络环境强相关。
-        
+
+        MicroWARP now supports **dual-stack IPv4/IPv6** and selectable tunnels:
+        **WireGuard (kernel, default)** or **MASQUE (usque, `TUNNEL_PROTOCOL=masque`)**.
+        现已支持 **IPv4/IPv6 双栈**，以及可选隧道：**WireGuard（内核，默认）** / **MASQUE（usque，`TUNNEL_PROTOCOL=masque`）**。
+
         1. **Strictly PROHIBITED on servers in Mainland China / 严禁在中国大陆境内机器运行**
            NEVER run this program on cloud servers located in Mainland China (e.g., Alibaba Cloud, Tencent Cloud)! Running proxy tools on domestic clouds will not only be precisely blocked by the GFW, but will also trigger the cloud provider's security audit, directly resulting in permanent account bans and server termination. Any issues caused by such environments will be strictly ignored.
            绝对不要在阿里云、腾讯云等任何位于中国大陆境内的云服务器上运行此程序！在国内云上运行此类代理穿透工具，不仅必定被 GFW 精准阻断，更会触发云厂商的安全风控审计，直接导致您的云账号被永久封禁、服务器被强制清退（封号封机）。此类环境导致的任何问题一律不予处理。
-           
+
         2. **Region & Cloud Provider Blocks / 地区与云厂商阻断**
            Restricted regions like RU / IR can barely access the CF API directly. IP ranges of Oracle Cloud are highly likely to be strictly risk-controlled and blocked by CF natively.
            RU / IR 等受限地区几乎无法直接访问 CF API；甲骨文云 (Oracle Cloud) 的 IP 段大概率被 CF 官方严格风控和拦截。
-           
-        3. **'resolve' Field Validation Restrictions / Resolve 字段校验限制**
-           Some CF-WARP datacenters (e.g., in HK) forcibly validate the `resolve` field in handshake packets. Since MicroWARP uses a minimalist Linux kernel native `wg0` interface, this field cannot be forged currently. If you encounter "failed to get outbound IP", simply being able to Ping the Endpoint is NOT enough; you MUST try replacing it with a valid Endpoint IP from other datacenters to bypass this.
-           部分地区（如 HK）的 CF-WARP 机房会强制校验握手包中的 `resolve` 字段。由于 MicroWARP 采用极简的 Linux 内核原生 `wg0` 态，目前暂无法伪造该字段。如果遇到“获取出口 IP 失败”，不仅仅是 Endpoint 能 Ping 通就行，必须尝试更换其他机房的有效 Endpoint IP 才能绕过。
+
+        3. **WireGuard Endpoint / `resolve` validation (WG path only) / WireGuard 路径的 Endpoint 与 resolve 校验**
+           Some CF-WARP datacenters (e.g. HK) may validate handshake metadata. On the **kernel WireGuard** path, try `ENDPOINT_IP` (e.g. `162.159.192.1:4500`) if egress probes fail despite a reachable UDP endpoint.
+           部分机房会对 WG 握手做校验。仅 **WireGuard 内核路径** 可试 `ENDPOINT_IP` 换节点；**Ping 通 ≠ 隧道可用**。
+
+        4. **WireGuard UDP blocked? Use MASQUE / WG UDP 被 QoS 或封锁时请用 MASQUE**
+           If UDP 2408/4500 is filtered, set `TUNNEL_PROTOCOL=masque` (HTTP/3 QUIC **UDP 443**, optional `MASQUE_PROXY_MODE=socks` + `MASQUE_HTTP2=1` for TCP 443). MASQUE is userspace and uses more RAM (`GOMEMLIMIT`, default 512MiB).
+           若 WG 的 UDP 被限速/封锁，请设 `TUNNEL_PROTOCOL=masque`（HTTP/3 **UDP 443**；QUIC 也被拦时用 `MASQUE_PROXY_MODE=socks` + `MASQUE_HTTP2=1` 走 TCP）。MASQUE 为用户态，内存更高。
+
+        5. **IPv6 / 双栈**
+           Dual-stack is **on by default** (`ENABLE_IPV6=1`). Tunnel IPv6 does **not** require Docker daemon IPv6. For IPv6 **clients connecting to** the SOCKS port, set `BIND_ADDR=::` and enable host/Docker IPv6. If `wg-quick` fails on broken host IPv6, use `ENABLE_IPV6=0`.
+           默认双栈。隧道内 IPv6 **不依赖** Docker IPv6 bridge。若要让客户端用 IPv6 **连入** SOCKS，需 `BIND_ADDR=::` 且宿主/Docker 开 IPv6。宿主 IPv6 异常导致 `wg-quick` 失败时设 `ENABLE_IPV6=0`。
+
+        6. **Persist identity / 必须持久化身份**
+           Always mount a volume on `/etc/wireguard` (`wg0.conf` + `masque-config.json`). Re-registering every restart hits Cloudflare rate limits.
+           务必挂载 `/etc/wireguard` volume，避免每次重启重新注册触发限流。
+
+  - type: dropdown
+    id: tunnel_protocol
+    attributes:
+      label: "Tunnel protocol in use / 使用的隧道协议"
+      description: |
+        Which path are you running? (see README: `TUNNEL_PROTOCOL`)
+        当前运行的是哪条路径？（见 README：`TUNNEL_PROTOCOL`）
+      options:
+        - "wireguard (default, kernel wg0 + microsocks)"
+        - "masque / usque (l4-socks)"
+        - "masque / usque (full socks / gVisor)"
+        - "masque + MASQUE_HTTP2=1 (TCP fallback)"
+        - "Unknown / mixed / 不清楚"
+    validations:
+      required: true
 
   - type: dropdown
     id: virtualization
     attributes:
       label: "Server Virtualization Type / 服务器虚拟化类型"
       description: |
-        The current kernel-level mode heavily relies on network privileges. Note: Before the Fallback feature is implemented, non-KVM environments cannot run this program.
-        目前的内核级模式强依赖于网卡特权。注意：Fallback 降级功能实装前，非 KVM 环境无法运行。
+        **WireGuard (kernel)** needs NET_ADMIN / WireGuard module (or wireguard-go where applicable). Non-KVM (LXC/OpenVZ) often cannot use kernel WG — use **`TUNNEL_PROTOCOL=masque`** instead (userspace, no wg0).
+        **WireGuard 内核路径**依赖 NET_ADMIN / WG 模块。LXC/OpenVZ 等常无法跑内核 WG，请改用 **`TUNNEL_PROTOCOL=masque`**（用户态，不依赖 wg0）。
       options:
         - "KVM / Regular Cloud VPS (AWS, etc.)"
         - "Bare Metal / 独立物理机"
@@ -60,19 +92,44 @@ body:
       options:
         - label: "I confirm that the server is NOT located in Mainland China, and I am aware of the account ban risks of running this on domestic cloud servers. / 我已经确认当前服务器不在中国大陆境内，我清楚在国内云服务器运行的封号风险。"
           required: true
-        - label: "I have tried deleting the original config volume (e.g., `warp-data` dir) and letting the program regenerate the account config. / 我已经尝试过删除原有的配置卷 (如 `warp-data` 目录) 并让程序重新生成账号配置。"
+        - label: "I have a persistent volume on `/etc/wireguard` (do not re-register on every restart). / 已挂载 `/etc/wireguard` 持久卷（避免每次重启重新注册）。"
           required: true
-        - label: "I have tried changing the Endpoint via the `ENDPOINT_IP` environment variable to bypass datacenter blocks. / 我已经尝试过通过环境变量 `ENDPOINT_IP` 更换其他的 Endpoint IP 以应对机房拦截。"
+        - label: "I have tried deleting the config volume once and regenerating identity only when necessary. / 仅在必要时删除配置卷并重新生成身份（非每次重启）。"
           required: false
+        - label: "WireGuard path: I tried `ENDPOINT_IP` (e.g. port 4500) if UDP/handshake failed. / WireGuard 路径：UDP/握手失败时已尝试 `ENDPOINT_IP`（如 4500 端口）。"
+          required: false
+        - label: "If WireGuard UDP is blocked/QoSed, I tried `TUNNEL_PROTOCOL=masque` (and optional `MASQUE_HTTP2=1` with full `socks`). / 若 WG UDP 被封/QoS，已尝试 `TUNNEL_PROTOCOL=masque`（必要时 full socks + `MASQUE_HTTP2=1`）。"
+          required: false
+        - label: "IPv6 issues: I tried `ENABLE_IPV6=0` or `BIND_ADDR=::` as documented (dual-stack is already supported). / IPv6：已按文档尝试 `ENABLE_IPV6=0` 或 `BIND_ADDR=::`（双栈已支持，非未实现）。"
+          required: false
+
+  - type: textarea
+    id: env_config
+    attributes:
+      label: "Relevant environment variables / 相关环境变量"
+      description: |
+        Paste non-secret env (redact passwords). Especially: `TUNNEL_PROTOCOL`, `ENABLE_IPV6`, `BIND_ADDR`, `MASQUE_*`, `ENDPOINT_IP`, `GOMEMLIMIT`.
+        粘贴非敏感环境变量（密码打码）。重点：`TUNNEL_PROTOCOL`、`ENABLE_IPV6`、`BIND_ADDR`、`MASQUE_*`、`ENDPOINT_IP`、`GOMEMLIMIT`。
+      placeholder: |
+        TUNNEL_PROTOCOL=wireguard
+        ENABLE_IPV6=1
+        BIND_ADDR=0.0.0.0
+        # MASQUE example:
+        # TUNNEL_PROTOCOL=masque
+        # MASQUE_PROXY_MODE=l4-socks
+        # GOMEMLIMIT=512MiB
+      render: shell
+    validations:
+      required: false
 
   - type: textarea
     id: special_env
     attributes:
       label: "Special Network Architecture (Optional) / 特殊网络架构说明 (选填)"
       description: |
-        Are you using SD-WAN (e.g., Tailscale / ZeroTier), or sharing the Docker network stack (e.g., `network_mode: service:microwarp` with other containers)?
-        是否有进行异地组网 (如 Tailscale / ZeroTier)，或者使用了 Docker 的共用网络栈 (如 `network_mode: service:microwarp` 搭配其他容器)？
-      placeholder: "Leave blank if no special network architecture... / 如果没有特殊网络架构，请留空..."
+        SD-WAN (Tailscale / ZeroTier), `network_mode: service:microwarp`, custom sysctls, etc.?
+        是否有 Tailscale / ZeroTier、共用网络栈、自定义 sysctl 等？
+      placeholder: "Leave blank if none... / 无则留空..."
 
   - type: textarea
     id: description
@@ -81,6 +138,8 @@ body:
       description: |
         Please clearly describe what happened and how to reproduce the issue.
         请清晰地描述发生了什么，以及如何复现该问题。
+        Note: “No IPv6” or “Need MASQUE” alone are not bugs if env is misconfigured — dual-stack and MASQUE are supported.
+        注意：仅“没有 IPv6 / 需要 MASQUE”在未正确配置时不算缺陷——双栈与 MASQUE 均已支持。
     validations:
       required: true
 
@@ -89,8 +148,8 @@ body:
     attributes:
       label: "Runtime Logs / 运行日志"
       description: |
-        Please paste the FULL output of `docker logs microwarp`.
-        请粘贴 `docker logs microwarp` 的完整输出内容。
+        Please paste the FULL output of `docker logs microwarp` (include register / usque lines if MASQUE).
+        请粘贴 `docker logs microwarp` 完整输出（MASQUE 请包含 register / usque 相关行）。
       render: shell
     validations:
       required: true
