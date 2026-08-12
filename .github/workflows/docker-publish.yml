@@ -87,14 +87,16 @@ jobs:
           DEFAULT_INTRO="$(printf '%s\n' \
             '## MicroWARP' \
             '' \
-            '极简、高性能的 Cloudflare WARP SOCKS5 Docker 代理（内核 WireGuard + pure C microsocks）。' \
-            '支持 **IPv4 / IPv6 双栈**，常驻内存约 **800KB**。' \
+            '极简、高性能的 Cloudflare WARP SOCKS5 Docker 代理。' \
+            '默认 **内核 WireGuard + pure C microsocks**（~800KB）；可选 **MASQUE (usque)** 抗封锁。' \
+            '支持 **IPv4 / IPv6 双栈**。' \
             '' \
             '```bash' \
             "docker pull ${IMAGE_REF}" \
             '```' \
             '' \
             "详见 [README](https://github.com/${REPO}#readme)。")"
+
 
           patch_release() {
             # $1 = jq object fields as JSON object string, e.g. {"body":"..."}
@@ -162,7 +164,8 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           labels: |
             org.opencontainers.image.title=MicroWARP
-            org.opencontainers.image.description=Minimalist high-performance Cloudflare WARP SOCKS5 proxy (dual-stack IPv4/IPv6)
+            org.opencontainers.image.description=Minimalist Cloudflare WARP SOCKS5 proxy — kernel WireGuard (default) + optional MASQUE/usque
+
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: |
