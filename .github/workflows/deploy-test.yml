@@ -367,9 +367,14 @@ jobs:
           set -eux
           . /tmp/microwarp-e2e-helpers.sh
           EXTRA_SYSCTL="$(detect_extra_sysctl || true)"
+          # 停 full socks 前先落盘日志（否则后续诊断会看到 Exited，误以为失败）
+          echo "----- full socks 停机前日志 -----"
+          docker logs test-masque 2>&1 | tail -n 80 || true
           # 停 full socks 再启 l4，共用 volume → 不再 register
+          # docker stop 可能导致 usque 以非 0 退出，属预期，不代表 MASQUE 失败
           docker stop test-masque >/dev/null 2>&1 || true
           docker rm -f test-masque-l4 >/dev/null 2>&1 || true
+
           # shellcheck disable=SC2086
           docker run -d \
             --name test-masque-l4 \
