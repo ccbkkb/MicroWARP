@@ -19,11 +19,11 @@ Here is a real-world performance test on a 1C1G (1 vCPU, 1GB RAM) VPS, comparing
 | :--- | :--- | :--- | :--- |
 | **Image Size**<br>(Docker 镜像体积) | 201 MB | **~15–20 MB** *(含可选 usque)* | 📉 **~-90%** |
 | **RAM Usage**<br>(日常内存占用) | ~150 MB | **~800 KiB** WG 默认<br>*(MASQUE 为用户态，更高)* | 📉 **-99.4%** *(WG)* |
-
 | **CPU Overhead**<br>(高并发 CPU 损耗) | High (Userspace App) | **~0.25%** (Kernel Space) | ⚡ **Near Zero** |
 | **Core Engine**<br>(底层核心引擎) | Cloudflare `warp-cli` (Rust) | Linux `wg0` + Pure C `microsocks` *(default)*<br>Optional **MASQUE** via `usque` | 🛠️ **Minimalist + Compatible** |
 | **IP Stack**<br>(协议栈) | Mostly IPv4-focused | **Dual-stack IPv4 + IPv6** | 🌐 **Native** |
 | **Tunnel protocol**<br>(隧道协议) | WireGuard / MASQUE (daemon) | **WireGuard kernel (default)** or **MASQUE userspace** | 🔀 **Selectable** |
+
 
 
 > **🔥 Real `docker stats` output:**
@@ -150,8 +150,9 @@ Example MASQUE (anti-block / UDP QoS):
 | Engine | Linux kernel `wg0` + `microsocks` | [usque](https://github.com/Diniboy1123/usque) userspace |
 | Wire image | UDP 2408 / 4500 (non-standard-ish) | HTTP/3 QUIC **UDP 443** (optional HTTP/2 **TCP 443**) |
 | RAM | **~800 KB** | Tens–hundreds of MB (set `GOMEMLIMIT`) |
-| Best for | 1C1G VPS, max efficiency | WG blocked/QoSed, captive portals, “looks like HTTPS” |
+| Best for | 1C1G VPS, max efficiency | WG blocked/QoSed, captive portals, "looks like HTTPS" |
 | Capabilities | Full IP tunnel + dual-stack policy routing | `l4-socks` = TCP only; `socks` = TCP+UDP via gVisor |
+
 
 > **Identity persistence:** both `wg0.conf` and `masque-config.json` live under `/etc/wireguard`. Always mount the volume — re-registering every restart will hit Cloudflare rate limits.
 
@@ -298,6 +299,7 @@ MASQUE 示例（抗封锁 / UDP 被 QoS）：
 | 内存 | **约 800 KB** | 数十～上百 MB（请设 `GOMEMLIMIT`） |
 | 适用 | 1C1G、极致省资源 | WG 被封/QoS、需要更像 HTTPS |
 | 能力 | 完整 IP 隧道 + 双栈策略路由 | `l4-socks` 仅 TCP；`socks` 经 gVisor 支持 TCP+UDP |
+
 
 > **务必挂载 volume**：`wg0.conf` 与 `masque-config.json` 都在 `/etc/wireguard`。每次重启重新注册会触发 Cloudflare 限流。
 
