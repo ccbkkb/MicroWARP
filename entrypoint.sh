@@ -506,8 +506,16 @@ register_masque() {
         return 0
     fi
 
+    # Drop zero-byte leftovers that confuse usque
+    if [ -f "$USQUE_CONFIG" ] && [ ! -s "$USQUE_CONFIG" ]; then
+        rm -f "$USQUE_CONFIG"
+    fi
+
     log "未检测到 MASQUE 配置，正在通过 usque 注册 Cloudflare WARP 设备..."
-    # usque writes config next to -c path; -a accepts ToS non-interactively
+    log "（注册完成前 SOCKS 不会监听；请勿在此阶段探测端口）"
+
+    # Absolute path for -c; run from conf_dir so any relative side files land here.
+    # -a accepts ToS non-interactively.
     set -- usque -c "$USQUE_CONFIG" register -a
     if [ -n "$USQUE_DEVICE_NAME" ]; then
         set -- "$@" -n "$USQUE_DEVICE_NAME"
@@ -517,8 +525,29 @@ register_masque() {
         set -- "$@" --jwt "$WARP_JWT"
     fi
 
-    if ! "$@"; then
+    reg_log="$(mktemp /tmp/usque-register.XXXXXX 2>/dev/null || echo /tmp/usque-register.log)"
+    # Capture output for diagnosis; usque often logs "Config file not found" before creating one.
+    if ! (
+        cd "$conf_dir" || exit 1
+        "$@" >"$reg_log" 2>&1
+    ); then
+        warn "usque register 输出："
+        cat "$reg_log" 2>/dev/null || true
+        rm -f "$reg_log"
         die "usque register 失败（可能触发 Cloudflare 限流，请稍后重试并确保 volume 持久化配置）"
+    fi
+    # Show last lines even on success (helps CI)
+    if [ -s "$reg_log" ]; then
+        tail -n 15 "$reg_log" 2>/dev/null || true
+    fi
+    rm -f "$reg_log"
+
+    # usque may write config.json next to CWD if -c path is awkward — normalize.
+    if [ ! -f "$USQUE_CONFIG" ] || [ ! -s "$USQUE_CONFIG" ]; then
+        if [ -f "$conf_dir/config.json" ] && [ -s "$conf_dir/config.json" ]; then
+            mv -f "$conf_dir/config.json" "$USQUE_CONFIG"
+            log "已将 config.json 规范为 ${USQUE_CONFIG}"
+        fi
     fi
 
     [ -f "$USQUE_CONFIG" ] && [ -s "$USQUE_CONFIG" ] || \
@@ -526,6 +555,7 @@ register_masque() {
 
     log "MASQUE 设备注册成功 → ${USQUE_CONFIG}"
 }
+
 
 # Best-effort license bind (WARP+). Failures are non-fatal.
 maybe_apply_warp_license() {
