@@ -350,8 +350,8 @@ nohup gost -F=socks5://admin:123456@127.0.0.1:1080 -L=http://127.0.0.1:8081 > /d
 
 <a href="https://www.star-history.com/?repos=ccbkkb%2FMicroWARP&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ccbkkb/MicroWARP&type=date&theme=dark&legend=top-left&sealed_token=E9V7v_-roZj_Qp5MPtcMNG7kMJbD6SAkh_nWVRl5EjGhbH2qNhuRyVWMxv0sgElkhUhAtY-F4AN8fQAeQ6dHl7dWqXAIOyfkX5r7Vx6X9IVI27axW9eBvg" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ccbkkb/MicroWARP&type=date&legend=top-left&sealed_token=E9V7v_-roZj_Qp5MPtcMNG7kMJbD6SAkh_nWVRl5EjGhbH2qNhuRyVWMxv0sgElkhUhAtY-F4AN8fQAeQ6dHl7dWqXAIOyfkX5r7Vx6X9IVI27axW9eBvg" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ccbkkb/MicroWARP&type=date&legend=top-left&sealed_token=E9V7v_-roZj_Qp5MPtcMNG7kMJbD6SAkh_nWVRl5EjGhbH2qNhuRyVWMxv0sgElkhUhAtY-F4AN8fQAeQ6dHl7dWqXAIOyfkX5r7Vx6X9IVI27axW9eBvg" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ccbkkb/MicroWARP&type=date&theme=dark&legend=top-left&sealed_token=JME1c1aIZp14FCkPGzzhIB7DsV04xEr3shE9bji6mkubvMaTvxspE_mzaUJ6ZeGWapxjMO1mTsRDj3VlLdwvv_VkciZTSPj4xKwaiPzsZD5--63fHWkJrQ" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ccbkkb/MicroWARP&type=date&legend=top-left&sealed_token=JME1c1aIZp14FCkPGzzhIB7DsV04xEr3shE9bji6mkubvMaTvxspE_mzaUJ6ZeGWapxjMO1mTsRDj3VlLdwvv_VkciZTSPj4xKwaiPzsZD5--63fHWkJrQ" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ccbkkb/MicroWARP&type=date&legend=top-left&sealed_token=JME1c1aIZp14FCkPGzzhIB7DsV04xEr3shE9bji6mkubvMaTvxspE_mzaUJ6ZeGWapxjMO1mTsRDj3VlLdwvv_VkciZTSPj4xKwaiPzsZD5--63fHWkJrQ" />
  </picture>
 </a>
