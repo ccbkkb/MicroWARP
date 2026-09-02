@@ -13,6 +13,8 @@ WG_IFACE="${WG_IFACE:-wg0}"
 WG_MTU="${MTU:-1280}"
 LISTEN_ADDR="${BIND_ADDR:-0.0.0.0}"
 LISTEN_PORT="${BIND_PORT:-1080}"
+# Fail-safe opt-in required to start without SOCKS credentials
+ALLOW_NO_AUTH="${ALLOW_NO_AUTH:-0}"
 ENABLE_IPV6="${ENABLE_IPV6:-1}"
 TAILSCALE_CIDR="${TAILSCALE_CIDR:-100.64.0.0/10}"
 TAILSCALE_CIDR_V6="${TAILSCALE_CIDR_V6:-fd7a:115c:a1e0::/48}"
@@ -169,6 +171,39 @@ is_truthy() {
     case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
         1|true|yes|on) return 0 ;;
         *) return 1 ;;
+    esac
+}
+
+# ==========================================
+# Fail-safe guard: refuse to launch an unauthenticated public proxy
+# unless ALLOW_NO_AUTH=1 explicitly opts in.
+# Called first in main() so unsafe configs die before any
+# registration / network activity.
+# ==========================================
+check_socks_auth_policy() {
+    auth_user="${SOCKS_USER:-}"
+    auth_pass="${SOCKS_PASS:-}"
+
+    # Both credentials set: normal authenticated mode.
+    if [ -n "$auth_user" ] && [ -n "$auth_pass" ]; then
+        return 0
+    fi
+
+    # Half-configured credentials are always a misconfiguration.
+    if [ -n "$auth_user" ] || [ -n "$auth_pass" ]; then
+        die "SOCKS_USER 与 SOCKS_PASS 必须同时设置；当前仅设置了其中一项"
+    fi
+
+    # No credentials at all: require explicit opt-in.
+    if ! is_truthy "$ALLOW_NO_AUTH"; then
+        die "安全防护：未配置 SOCKS_USER/SOCKS_PASS，拒绝启动无认证代理；如确需公开模式，请显式设置 ALLOW_NO_AUTH=1"
+    fi
+
+    warn "已通过 ALLOW_NO_AUTH=1 显式启用无认证公开模式"
+    case "$LISTEN_ADDR" in
+        0.0.0.0|::|'*')
+            warn "SOCKS 监听 ${LISTEN_ADDR}:${LISTEN_PORT}，请确保宿主机端口映射为 127.0.0.1:1080:1080，避免暴露公网"
+            ;;
     esac
 }
 
@@ -485,7 +520,7 @@ start_socks() {
         log "🔒 身份认证已开启 (User: ${SOCKS_USER})"
         set -- "$@" -u "$SOCKS_USER" -P "$SOCKS_PASS"
     else
-        warn "未设置 SOCKS_USER/SOCKS_PASS，当前为公开访问模式"
+        warn "无认证公开模式 (ALLOW_NO_AUTH=1)，请确保宿主机仅映射 127.0.0.1"
     fi
 
     log "🚀 MicroSOCKS 监听 ${LISTEN_ADDR}:${LISTEN_PORT}"
@@ -595,7 +630,7 @@ start_masque_socks() {
         log "🔒 身份认证已开启 (User: ${SOCKS_USER})"
         set -- "$@" -u "$SOCKS_USER" -w "$SOCKS_PASS"
     else
-        warn "未设置 SOCKS_USER/SOCKS_PASS，当前为公开访问模式"
+        warn "无认证公开模式 (ALLOW_NO_AUTH=1)，请确保宿主机仅映射 127.0.0.1"
     fi
 
     # HTTP/2 (TCP:443) fallback — only on full socks / modes that support it.
@@ -686,6 +721,9 @@ run_masque_path() {
 # Main
 # ==========================================
 main() {
+    # Fail-fast: block unsafe auth configs before any registration / network I/O.
+    check_socks_auth_policy
+
     proto="$(normalize_tunnel_protocol "$TUNNEL_PROTOCOL")"
     log "TUNNEL_PROTOCOL=${proto}"
 

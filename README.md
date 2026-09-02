@@ -93,6 +93,8 @@ Run the container:
 docker compose up -d
 ```
 
+> **Fail-safe defaults**: the sample mapping publishes only on host loopback (`127.0.0.1:1080:1080`), so the proxy is never exposed publicly. Starting without `SOCKS_USER`/`SOCKS_PASS` is refused unless you explicitly set `ALLOW_NO_AUTH=1`.
+
 ### ⚙️ Environment Variables
 
 | Variable | Default | Description |
@@ -100,7 +102,8 @@ docker compose up -d
 | **`TUNNEL_PROTOCOL`** | `wireguard` | `wireguard` (kernel, default) or `masque` (usque). Aliases: `wg` / `usque`. |
 | `BIND_ADDR` | `0.0.0.0` | SOCKS5 listen address. Use `::` for IPv6 / dual-stack listen. |
 | `BIND_PORT` | `1080` | SOCKS5 listen port. |
-| `SOCKS_USER` / `SOCKS_PASS` | *(empty)* | Optional SOCKS5 authentication. Both must be set. |
+| `SOCKS_USER` / `SOCKS_PASS` | *(empty)* | Optional SOCKS5 authentication. Both must be set together; starting with neither set is refused. |
+| `ALLOW_NO_AUTH` | `0` | Fail-safe opt-in: `1` (or `true`/`yes`/`on`) allows starting without SOCKS credentials (public proxy). |
 | `ENABLE_IPV6` | `1` | `1`/`true` = dual-stack WARP; `0` = IPv4-only. |
 | `MTU` | `1280` | WireGuard interface MTU. |
 | `KEEPALIVE` | `15` | `PersistentKeepalive` seconds (NAT/QoS keep-alive). |
@@ -215,7 +218,7 @@ services:
     container_name: microwarp
     restart: always
     ports:
-      - "127.0.0.1:1080:1080" # 默认无密码 SOCKS5 端口，仅监听本机
+      - "127.0.0.1:1080:1080" # 防呆默认：仅发布到宿主机回环，不暴露公网
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
@@ -236,6 +239,8 @@ volumes:
 docker compose up -d
 ```
 
+> **防呆默认**：示例映射仅发布到宿主机回环（`127.0.0.1:1080:1080`），代理不会暴露公网。未配置 `SOCKS_USER`/`SOCKS_PASS` 时会拒绝启动，除非显式设置 `ALLOW_NO_AUTH=1`。
+
 ### ⚙️ 环境变量一览
 
 | 变量 | 默认值 | 说明 |
@@ -243,7 +248,8 @@ docker compose up -d
 | **`TUNNEL_PROTOCOL`** | `wireguard` | `wireguard`（内核，默认）或 `masque`（usque）。别名：`wg` / `usque` |
 | `BIND_ADDR` | `0.0.0.0` | SOCKS5 监听地址；需要 IPv6 入站时设为 `::` |
 | `BIND_PORT` | `1080` | SOCKS5 监听端口 |
-| `SOCKS_USER` / `SOCKS_PASS` | 空 | 可选认证；需同时设置 |
+| `SOCKS_USER` / `SOCKS_PASS` | 空 | 可选认证；两者必须同时设置。均未设置时拒绝启动 |
+| `ALLOW_NO_AUTH` | `0` | 防呆开关：`1` 显式允许以无认证公开模式启动 |
 | `ENABLE_IPV6` | `1` | `1` 双栈 / `0` 仅 IPv4 |
 | `MTU` | `1280` | WireGuard MTU |
 | `KEEPALIVE` | `15` | UDP 心跳秒数，对抗 NAT/QoS |

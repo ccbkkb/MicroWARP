@@ -5,6 +5,9 @@ services:
     container_name: microwarp
     restart: always
     ports:
+      # Fail-safe default: publish only on the host loopback so an
+      # unauthenticated proxy is never exposed publicly. Only widen this
+      # mapping if you have configured SOCKS_USER/SOCKS_PASS.
       - "127.0.0.1:1080:1080"
     cap_add:
       - NET_ADMIN
@@ -31,6 +34,7 @@ services:
     #   - BIND_PORT=1080              # SOCKS5 listen port
     #   - SOCKS_USER=admin            # optional auth username
     #   - SOCKS_PASS=123456           # optional auth password
+    #   - ALLOW_NO_AUTH=              # 1 = allow starting with no SOCKS auth (public proxy; default 0 refuses)
     #   - ENABLE_IPV6=1               # 1/true = dual-stack WARP (default); 0 = IPv4 only
     #   - MTU=1280                    # WireGuard MTU
     #   - KEEPALIVE=15                # PersistentKeepalive seconds
