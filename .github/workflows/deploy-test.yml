@@ -20,6 +20,12 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
 
+    # CI 专用 SOCKS 凭据：entrypoint.sh 要求 SOCKS_USER/SOCKS_PASS 成对设置，
+    # 未配置时必须显式 ALLOW_NO_AUTH=1 才允许启动（无密码 + 0.0.0.0 监听防呆）。
+    env:
+      SOCKS_USER: microwarp-ci
+      SOCKS_PASS: ci-warp-pass-123
+
     steps:
       - name: 📥 检出项目源码
         uses: actions/checkout@v4
@@ -77,25 +83,44 @@ jobs:
             " 2>/dev/null | grep -v grep | grep -Eq "${proc_re}"
           }
 
-          # SOCKS5 no-auth greeting: client \\x05\\x01\\x00 → expect \\x05\\x00
+          # SOCKS5 handshake, credential-aware (matches entrypoint.sh auth policy):
+          #   no creds : client \x05\x01\x00 → expect \x05\x00
+          #   with creds: \x05\x01\x02 → \x05\x02 → RFC1929 user/pass → expect \x01\x00
+          # Usage: socks5_handshake_ok HOST_PORT [USER] [PASS]
           socks5_handshake_ok() {
             host_port="$1"
+            hs_user="${2:-}"
+            hs_pass="${3:-}"
             # Prefer python if available (reliable binary I/O)
             if command -v python3 >/dev/null 2>&1; then
-              python3 - "$host_port" <<'PY' 2>/dev/null
+              python3 - "$host_port" "$hs_user" "$hs_pass" <<'PY' 2>/dev/null
           import socket, sys
           port = int(sys.argv[1])
-          s = socket.create_connection(("127.0.0.1", port), timeout=3)
+          user = sys.argv[2].encode() if len(sys.argv) > 2 and sys.argv[2] else b""
+          pwd = sys.argv[3].encode() if len(sys.argv) > 3 and sys.argv[3] else b""
+          s = socket.create_connection(("127.0.0.1", port), timeout=5)
           try:
+              if user and pwd:
+                  s.sendall(b"\x05\x01\x02")
+                  rep = s.recv(2)
+                  if rep != b"\x05\x02":
+                      sys.exit(1)
+                  s.sendall(b"\x01" + bytes([len(user)]) + user + bytes([len(pwd)]) + pwd)
+                  auth = s.recv(2)
+                  sys.exit(0 if auth == b"\x01\x00" else 1)
               s.sendall(b"\x05\x01\x00")
-              data = s.recv(2)
-              sys.exit(0 if data == b"\x05\x00" else 1)
+              rep = s.recv(2)
+              sys.exit(0 if rep == b"\x05\x00" else 1)
           finally:
               s.close()
           PY
               return $?
             fi
-            # bash /dev/tcp fallback
+            # bash /dev/tcp fallback (no-auth probes only; GH runners always have python3)
+            if [ -n "$hs_user" ] || [ -n "$hs_pass" ]; then
+              echo "socks5_handshake_ok: 认证模式需要 python3" >&2
+              return 1
+            fi
             exec 3<>/dev/tcp/127.0.0.1/"${host_port}" || return 1
             # shellcheck disable=SC2059
             printf '\x05\x01\x00' >&3
@@ -109,7 +134,7 @@ jobs:
             esac
           }
 
-          # Usage: wait_socks NAME HOST_PORT CONTAINER_PORT PROC_REGEX [TIMEOUT_SEC]
+          # Usage: wait_socks NAME HOST_PORT CONTAINER_PORT PROC_REGEX [TIMEOUT_SEC] [SOCKS_USER] [SOCKS_PASS]
           # PROC_REGEX examples:
           #   microsocks
           #   'usque.*(l4-socks|[[:space:]]socks[[:space:]])'
@@ -119,8 +144,10 @@ jobs:
             cport="$3"
             proc_re="$4"
             timeout_sec="${5:-300}"
+            w_user="${6:-}"
+            w_pass="${7:-}"
             echo "等待 ${name} 真正就绪 host:${host_port}→ctr:${cport}（≤${timeout_sec}s）"
-            echo "  条件: 1) 容器内 :${cport} LISTEN  2) 进程匹配 ${proc_re}  3) SOCKS5 握手"
+            echo "  条件: 1) 容器内 :${cport} LISTEN  2) 进程匹配 ${proc_re}  3) SOCKS5 握手${w_user:+（已带凭据）}"
             deadline=$((SECONDS + timeout_sec))
             while [ "$SECONDS" -lt "$deadline" ]; do
               if ! docker ps --format '{{.Names}}' | grep -qx "$name"; then
@@ -145,7 +172,7 @@ jobs:
                 sleep 2
                 continue
               fi
-              if ! socks5_handshake_ok "$host_port"; then
+              if ! socks5_handshake_ok "$host_port" "$w_user" "$w_pass"; then
                 echo "… 端口在听但 SOCKS 握手未通过，继续等待"
                 sleep 2
                 continue
@@ -165,17 +192,23 @@ jobs:
           }
 
           # IPv4 SOCKS with retries (tunnel may need a few seconds after listen)
-          # Usage: test_socks_ipv4 PORT LABEL [RETRIES]
+          # Usage: test_socks_ipv4 PORT LABEL [RETRIES] [SOCKS_USER] [SOCKS_PASS]
           test_socks_ipv4() {
             port="$1"
             label="$2"
             retries="${3:-5}"
+            t4_user="${4:-}"
+            t4_pass="${5:-}"
+            t4_proxy="socks5://127.0.0.1:${port}"
+            if [ -n "$t4_user" ] && [ -n "$t4_pass" ]; then
+              t4_proxy="socks5://${t4_user}:${t4_pass}@127.0.0.1:${port}"
+            fi
             echo "===== ${label}: IPv4 SOCKS → https://1.1.1.1/cdn-cgi/trace ====="
             n=0
             while [ "$n" -lt "$retries" ]; do
               n=$((n + 1))
               set +e
-              out="$(curl -sS -m 30 -x "socks5://127.0.0.1:${port}" https://1.1.1.1/cdn-cgi/trace 2>&1)"
+              out="$(curl -sS -m 30 -x "$t4_proxy" https://1.1.1.1/cdn-cgi/trace 2>&1)"
               rc=$?
               set -e
               echo "attempt ${n}/${retries} rc=${rc}"
@@ -194,9 +227,17 @@ jobs:
             port="$1"
             label="$2"
             required="${3:-0}"
+            t6_user="${4:-}"
+            t6_pass="${5:-}"
+            t6_proxy="socks5h://127.0.0.1:${port}"
+            t6_proxy_auth="socks5://127.0.0.1:${port}"
+            if [ -n "$t6_user" ] && [ -n "$t6_pass" ]; then
+              t6_proxy="socks5h://${t6_user}:${t6_pass}@127.0.0.1:${port}"
+              t6_proxy_auth="socks5://${t6_user}:${t6_pass}@127.0.0.1:${port}"
+            fi
             echo "===== ${label}: IPv6 via SOCKS5h → cloudflare.com/cdn-cgi/trace ====="
             set +e
-            out="$(curl -sS -m 45 -6 -x "socks5h://127.0.0.1:${port}" \
+            out="$(curl -sS -m 45 -6 -x "$t6_proxy" \
               https://www.cloudflare.com/cdn-cgi/trace 2>&1)"
             rc=$?
             set -e
@@ -206,7 +247,7 @@ jobs:
               return 0
             fi
             set +e
-            out2="$(curl -sS -m 45 -x "socks5://127.0.0.1:${port}" \
+            out2="$(curl -sS -m 45 -x "$t6_proxy_auth" \
               --resolve "www.cloudflare.com:443:2606:4700:4700::1111" \
               https://www.cloudflare.com/cdn-cgi/trace 2>&1)"
             rc2=$?
@@ -239,6 +280,55 @@ jobs:
           chmod +x /tmp/microwarp-e2e-helpers.sh
 
       # ==========================================
+      # 防呆护栏自检（对应 entrypoint.sh check_socks_auth_policy）
+      # 无凭据 / 半凭据启动必须被拒绝；显式 ALLOW_NO_AUTH=1 才放行
+      # ==========================================
+      - name: "🛡️ 防呆: 无凭据/半凭据容器必须拒绝启动"
+        run: |
+          set -eu
+          check_refuse() {
+            cname="$1"
+            expect="$2"
+            shift 2
+            docker rm -f "$cname" >/dev/null 2>&1 || true
+            docker run -d --name "$cname" "$@" microwarp-test:local >/dev/null
+            for _ in $(seq 1 30); do
+              st="$(docker inspect -f '{{.State.Status}}' "$cname" 2>/dev/null || echo gone)"
+              case "$st" in
+                running|created|restarting) sleep 1 ;;
+                *) break ;;
+              esac
+            done
+            st="$(docker inspect -f '{{.State.Status}}' "$cname" 2>/dev/null || echo gone)"
+            rc="$(docker inspect -f '{{.State.ExitCode}}' "$cname" 2>/dev/null || echo na)"
+            logs="$(docker logs "$cname" 2>&1 || true)"
+            echo "----- ${cname}: status=${st} exit=${rc} -----"
+            echo "$logs"
+            docker rm -f "$cname" >/dev/null 2>&1 || true
+            if [ "$st" = "running" ]; then
+              echo "❌ ${cname}: 防呆未拦截，容器仍在运行"
+              return 1
+            fi
+            if [ "$rc" = "0" ]; then
+              echo "❌ ${cname}: 防呆应以非 0 退出码终止"
+              return 1
+            fi
+            case "$logs" in
+              *"$expect"*)
+                echo "✅ ${cname}: 防呆生效（命中提示: ${expect}）"
+                ;;
+              *)
+                echo "❌ ${cname}: 日志未包含预期提示「${expect}」"
+                return 1
+                ;;
+            esac
+          }
+          # 用例 1: 无凭据且未显式 ALLOW_NO_AUTH=1 → 必须拒绝启动无认证代理
+          check_refuse test-guard-none "拒绝启动无认证代理"
+          # 用例 2: 半凭据（仅 SOCKS_USER，无 SOCKS_PASS）→ 必须拒绝启动
+          check_refuse test-guard-half "必须同时设置" -e SOCKS_USER=half-user
+
+      # ==========================================
       # WireGuard (kernel, default)
       # ==========================================
       - name: "🟢 WireGuard: 启动容器"
@@ -259,6 +349,8 @@ jobs:
             -p 1080:1080 \
             -e TUNNEL_PROTOCOL=wireguard \
             -e ENABLE_IPV6=1 \
+            -e SOCKS_USER="$SOCKS_USER" \
+            -e SOCKS_PASS="$SOCKS_PASS" \
             microwarp-test:local
 
       - name: "🟢 WireGuard: 等待 SOCKS5"
@@ -266,14 +358,14 @@ jobs:
         run: |
           set -eu
           . /tmp/microwarp-e2e-helpers.sh
-          wait_socks test-wg 1080 1080 'microsocks' 180
+          wait_socks test-wg 1080 1080 'microsocks' 180 "$SOCKS_USER" "$SOCKS_PASS"
 
       - name: "🟢 WireGuard: IPv4 SOCKS 连通性"
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_wireguard }}
         run: |
           set -eu
           . /tmp/microwarp-e2e-helpers.sh
-          test_socks_ipv4 1080 "WireGuard" 5
+          test_socks_ipv4 1080 "WireGuard" 5 "$SOCKS_USER" "$SOCKS_PASS"
 
       - name: "🟢 WireGuard: IPv6 出口（SOCKS + 容器内 wg0）"
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_wireguard }}
@@ -281,7 +373,7 @@ jobs:
         run: |
           set -eu
           . /tmp/microwarp-e2e-helpers.sh
-          test_socks_ipv6 1080 "WireGuard" 0
+          test_socks_ipv6 1080 "WireGuard" 0 "$SOCKS_USER" "$SOCKS_PASS"
           echo "----- 容器内 curl -6 via wg0 -----"
           docker exec test-wg sh -c \
             'curl -6 -sS --connect-timeout 3 -m 8 https://www.cloudflare.com/cdn-cgi/trace | head -n 20 || true'
@@ -330,6 +422,8 @@ jobs:
             -e USQUE_DEVICE_NAME=MicroWARP-CI \
             -e BIND_ADDR=0.0.0.0 \
             -e BIND_PORT=1080 \
+            -e SOCKS_USER="$SOCKS_USER" \
+            -e SOCKS_PASS="$SOCKS_PASS" \
             microwarp-test:local
 
       - name: "🟣 MASQUE: 等待 SOCKS5（须过完 register）"
@@ -339,7 +433,7 @@ jobs:
           . /tmp/microwarp-e2e-helpers.sh
           # 必须匹配 socks 子命令，不能匹配 usque register
           # 注册 + QUIC 可能较慢，给 300s
-          wait_socks test-masque 1081 1080 'usque.*(l4-socks|[[:space:]]socks([[:space:]]|$))' 300
+          wait_socks test-masque 1081 1080 'usque.*(l4-socks|[[:space:]]socks([[:space:]]|$))' 300 "$SOCKS_USER" "$SOCKS_PASS"
           # 确认身份文件已落盘
           docker exec test-masque sh -c \
             'test -s /etc/wireguard/masque-config.json && wc -c /etc/wireguard/masque-config.json'
@@ -349,7 +443,7 @@ jobs:
         run: |
           set -eu
           . /tmp/microwarp-e2e-helpers.sh
-          test_socks_ipv4 1081 "MASQUE" 8
+          test_socks_ipv4 1081 "MASQUE" 8 "$SOCKS_USER" "$SOCKS_PASS"
 
       - name: "🟣 MASQUE: IPv6 经 SOCKS 出口"
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_masque }}
@@ -357,10 +451,10 @@ jobs:
         run: |
           set -eu
           . /tmp/microwarp-e2e-helpers.sh
-          test_socks_ipv6 1081 "MASQUE" 0
+          test_socks_ipv6 1081 "MASQUE" 0 "$SOCKS_USER" "$SOCKS_PASS"
           docker exec test-masque sh -c 'ps w 2>/dev/null || ps; ls -la /etc/wireguard' || true
 
-      - name: "🟣 MASQUE: l4-socks 冒烟（复用同一账号 volume）"
+      - name: "🟣 MASQUE: l4-socks 冒烟（复用 volume + ALLOW_NO_AUTH 无密码放行）"
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_masque }}
         continue-on-error: true
         run: |
@@ -372,6 +466,7 @@ jobs:
           docker logs test-masque 2>&1 | tail -n 80 || true
           # 停 full socks 再启 l4，共用 volume → 不再 register
           # docker stop 可能导致 usque 以非 0 退出，属预期，不代表 MASQUE 失败
+          # l4 不带 SOCKS 凭据 → 走 ALLOW_NO_AUTH=1 显式放行（无密码 + 0.0.0.0 监听防呆路径）
           docker stop test-masque >/dev/null 2>&1 || true
           docker rm -f test-masque-l4 >/dev/null 2>&1 || true
 
@@ -386,9 +481,21 @@ jobs:
             -e MASQUE_PROXY_MODE=l4-socks \
             -e GOMEMLIMIT=256MiB \
             -e USQUE_DEVICE_NAME=MicroWARP-CI \
+            -e ALLOW_NO_AUTH=1 \
             microwarp-test:local
           wait_socks test-masque-l4 1082 1080 'usque.*l4-socks' 180
           test_socks_ipv4 1082 "MASQUE-l4" 5
+          # 验证无密码显式放行路径: 默认 0.0.0.0 监听 + 防呆告警应写入日志
+          lg="$(docker logs test-masque-l4 2>&1 || true)"
+          if ! printf '%s' "$lg" | grep -q 'ALLOW_NO_AUTH=1'; then
+            echo "❌ 未看到 ALLOW_NO_AUTH=1 显式放行提示"
+            exit 1
+          fi
+          if ! printf '%s' "$lg" | grep -qE '监听 0\.0\.0\.0:1080'; then
+            echo "❌ 未看到 0.0.0.0:1080 监听防呆告警"
+            exit 1
+          fi
+          echo "✅ 无密码显式放行 + 0.0.0.0 监听防呆告警均已确认"
 
       - name: "🟣 MASQUE: 诊断日志"
         if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_masque) }}
@@ -408,8 +515,9 @@ jobs:
         run: |
           echo "========================================="
           echo " MicroWARP E2E"
-          echo "  WireGuard: microsocks + wg0"
-          echo "  MASQUE:    usque socks / l4-socks"
+          echo "  防呆自检: 无凭据/半凭据必须拒启；ALLOW_NO_AUTH=1 显式放行（0.0.0.0 监听）"
+          echo "  WireGuard: microsocks + wg0（SOCKS_USER/SOCKS_PASS 认证握手）"
+          echo "  MASQUE:    usque socks（认证） / l4-socks（ALLOW_NO_AUTH=1 无密码）"
           echo "  就绪条件: 容器内 LISTEN + 正确子命令进程 + SOCKS5 握手"
           echo "  （不再把 usque register 或宿主端口映射误判为就绪）"
           echo "========================================="
